@@ -1,14 +1,44 @@
 {
-  "maj": null,
+  "maj": "2026-08-28T03:51:03.414Z",
   "fenetreJours": 90,
   "fuseau": "Europe/Paris",
   "service": "cursus-connect",
   "environnement": "production",
   "composants": {
-    "application": { "jours": {} },
-    "base": { "jours": {} },
-    "stockage": { "jours": {} }
+    "application": {
+      "jours": {
+        "2026-08-28": {
+          "n": 1,
+          "ko": 0
+        }
+      }
+    },
+    "base": {
+      "jours": {
+        "2026-08-28": {
+          "n": 1,
+          "ko": 0
+        }
+      }
+    },
+    "stockage": {
+      "jours": {
+        "2026-08-28": {
+          "n": 1,
+          "ko": 0
+        }
+      }
+    }
   },
   "incidents": [],
-  "dernier": null
+  "dernier": {
+    "t": "2026-08-28T03:51:03.414Z",
+    "http": 200,
+    "version": "1.546.0",
+    "application": true,
+    "base": true,
+    "stockage": true,
+    "schemaEnRetard": false,
+    "joignable": true
+  }
 }
