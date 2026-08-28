@@ -1,0 +1,14 @@
+{
+  "maj": null,
+  "fenetreJours": 90,
+  "fuseau": "Europe/Paris",
+  "service": "cursus-connect",
+  "environnement": "production",
+  "composants": {
+    "application": { "jours": {} },
+    "base": { "jours": {} },
+    "stockage": { "jours": {} }
+  },
+  "incidents": [],
+  "dernier": null
+}

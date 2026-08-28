@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>État des services — Cursus Connect</title>
+    <meta name="description" content="État de fonctionnement de Cursus Connect, la plateforme de pilotage des centres de simulation éditée par Life Support Distribution." />
+    <link rel="icon" type="image/svg+xml" href="logo.svg" />
+    <link rel="stylesheet" href="etat.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="entete">
+        <a class="marque" href="https://cursusconnect.com">
+          <img src="logo.svg" alt="" width="40" height="40" />
+          <span>
+            <b>Cursus Connect</b>
+            <small>par Life Support Distribution</small>
+          </span>
+        </a>
+        <details class="abonnement">
+          <summary>Être prévenu des incidents</summary>
+          <div class="abonnement-corps">
+            <p>
+              L'abonnement automatique aux notifications est en préparation. En attendant,
+              écrivez-nous : nous vous inscrirons à la liste d'alerte et vous préviendrons
+              par courriel dès qu'un incident affecte la production.
+            </p>
+            <a class="bouton" href="mailto:support@lifesupportdistribution.fr?subject=Alertes%20d%27incident%20Cursus%20Connect&amp;body=Bonjour%2C%0A%0AMerci%20de%20m%27inscrire%20aux%20alertes%20d%27incident%20de%20Cursus%20Connect.%0A%0ANom%20du%20centre%20%3A%20%0AAdresse%20%C3%A0%20pr%C3%A9venir%20%3A%20">Demander à être prévenu</a>
+          </div>
+        </details>
+      </header>
+
+      <!-- Le verdict. Ce qui est écrit ici est ce que voit un visiteur pendant
+           la seconde que dure le sondage : on n'annonce jamais « tout va bien »
+           avant de l'avoir vérifié. -->
+      <section id="banniere" class="banniere banniere--attente" aria-live="polite">
+        <span class="pastille"></span>
+        <h1 id="banniere-titre">Vérification en cours…</h1>
+      </section>
+      <p class="banniere-detail" id="banniere-detail">Nous interrogeons le service depuis votre navigateur.</p>
+
+      <p class="fenetre-note">Disponibilité sur les <b>90 derniers jours</b>.</p>
+
+      <section class="composants" id="composants" aria-label="Composants du service"></section>
+
+      <dl class="meta">
+        <div><dt>Version en service</dt><dd id="m-version">—</dd></div>
+        <div><dt>Dernier contrôle</dt><dd id="m-controle">—</dd></div>
+        <div><dt>Relevé automatique</dt><dd id="m-releve">—</dd></div>
+      </dl>
+
+      <h2 class="titre-section">Incidents passés</h2>
+      <section class="incidents" id="incidents"></section>
+
+      <section class="explication">
+        <h3>Comment cette page est mesurée</h3>
+        <p>
+          L'état affiché en haut est mesuré <b>à l'instant, depuis votre navigateur</b> : votre
+          appareil interroge directement le service. Les barres et les incidents proviennent
+          d'une sonde automatique qui contrôle la production <b>toutes les 15 minutes</b> et
+          consigne chaque relevé.
+        </p>
+        <p>
+          Cette page, sa sonde et son historique sont hébergés <b>ailleurs que Cursus Connect</b>,
+          et chez d'autres fournisseurs — volontairement : une page d'état qui tombe en même
+          temps que ce qu'elle surveille ne sert à rien.
+        </p>
+        <p>
+          Aucune donnée n'est collectée ici : pas de cookie, pas de mesure d'audience, aucun
+          appel à un service tiers.
+        </p>
+      </section>
+
+      <footer class="pied">
+        <span>Cursus Connect — édité par Life Support Distribution.</span>
+        <a href="https://cursusconnect.com">Accéder à l'application</a>
+      </footer>
+    </div>
+
+    <script src="etat.js" type="module"></script>
+  </body>
+</html>

@@ -1,0 +1,108 @@
+/* Cursus Connect — page d'état publique.
+   Aucune police distante, aucune image distante, aucun script tiers : la page
+   doit s'afficher entièrement même quand tout le reste est en panne. */
+:root{
+  --encre:#111a33; --douce:#5d6a88; --fond:#f4f6fb; --carte:#fff; --trait:#e3e8f2;
+  --ok:#15803d; --ok-vif:#22a95a; --alerte:#b45309; --alerte-vif:#f0a020;
+  --panne:#b3261e; --panne-vif:#e5484d; --muet:#d8dde9;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--fond);color:var(--encre);
+  font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,sans-serif;
+  font-size:15px;line-height:1.55}
+.page{max-width:720px;margin:0 auto;padding:30px 20px 56px}
+
+/* ---- en-tête ---- */
+.entete{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:30px}
+.marque{display:flex;align-items:center;gap:12px;text-decoration:none;color:inherit}
+.marque b{display:block;font-size:16px;line-height:1.25}
+.marque small{display:block;font-size:12.5px;color:var(--douce)}
+.abonnement{position:relative}
+.abonnement summary{list-style:none;cursor:pointer;font-size:13px;font-weight:600;
+  color:#fff;background:#1f2a55;border-radius:8px;padding:9px 15px;white-space:nowrap}
+.abonnement summary::-webkit-details-marker{display:none}
+.abonnement summary:hover{background:#2a3768}
+.abonnement-corps{position:absolute;right:0;top:calc(100% + 8px);width:min(330px,78vw);z-index:5;
+  background:var(--carte);border:1px solid var(--trait);border-radius:12px;padding:16px;
+  box-shadow:0 12px 34px rgba(16,24,54,.14)}
+.abonnement-corps p{margin:0 0 12px;font-size:13.5px;color:var(--douce)}
+.bouton{display:inline-block;font-size:13px;font-weight:600;text-decoration:none;
+  color:#fff;background:#1a6e9e;border-radius:8px;padding:8px 14px}
+
+/* ---- bannière ---- */
+.banniere{display:flex;align-items:center;gap:11px;border-radius:12px;padding:17px 20px;
+  color:#fff;background:#8a93a8}
+.banniere h1{font-size:17px;font-weight:600;margin:0}
+.banniere--ok{background:var(--ok-vif)}
+.banniere--degrade{background:var(--alerte-vif);color:#3b2705}
+.banniere--panne{background:var(--panne-vif)}
+.pastille{width:9px;height:9px;border-radius:50%;background:rgba(255,255,255,.85);flex:none}
+.banniere--degrade .pastille{background:rgba(59,39,5,.8)}
+.banniere-detail{margin:10px 2px 26px;font-size:13.5px;color:var(--douce)}
+
+.fenetre-note{margin:0 2px 10px;font-size:12.5px;color:var(--douce);text-align:right}
+.fenetre-note b{font-weight:600}
+
+/* ---- composants ---- */
+.composants{background:var(--carte);border:1px solid var(--trait);border-radius:12px;overflow:hidden}
+.composant{padding:18px 20px;border-bottom:1px solid var(--trait)}
+.composant:last-child{border-bottom:0}
+.composant-tete{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:11px}
+.composant-nom{font-weight:600;font-size:14.5px}
+.composant-etat{font-size:13px;font-weight:600}
+.e--ok{color:var(--ok)} .e--degrade{color:var(--alerte)} .e--panne{color:var(--panne)} .e--muet{color:var(--douce)}
+.barres{display:flex;gap:2px;align-items:stretch;height:32px}
+.barres span{flex:1 1 0;min-width:2px;border-radius:2px;background:var(--muet)}
+.barres .b--ok{background:var(--ok-vif)}
+.barres .b--partiel{background:var(--alerte-vif)}
+.barres .b--panne{background:var(--panne-vif)}
+.echelle{display:flex;justify-content:space-between;align-items:center;gap:10px;
+  margin-top:8px;font-size:11.5px;color:var(--douce)}
+.echelle span{white-space:nowrap}
+.echelle i{flex:1;height:1px;background:var(--trait)}
+.echelle b{font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
+
+/* ---- méta ---- */
+.meta{display:flex;flex-wrap:wrap;gap:30px;margin:20px 2px 34px}
+.meta div{margin:0}
+.meta dt{font-size:11.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--douce)}
+.meta dd{margin:3px 0 0;font-weight:600;font-variant-numeric:tabular-nums;font-size:14px}
+
+/* ---- incidents ---- */
+.titre-section{font-size:19px;margin:0 2px 6px}
+.incidents{margin-bottom:34px}
+.jour{padding:15px 2px;border-bottom:1px solid var(--trait)}
+.jour-date{font-size:14px;font-weight:600;margin:0 0 6px}
+.jour-vide{font-size:13px;color:var(--douce);margin:0}
+.incident{margin:0 0 8px;font-size:13.5px}
+.incident:last-child{margin-bottom:0}
+.incident b{color:var(--panne)}
+.incident .quand{color:var(--douce);font-variant-numeric:tabular-nums}
+
+/* ---- explication et pied ---- */
+.explication{background:transparent;border:1px dashed var(--trait);border-radius:12px;padding:18px 20px}
+.explication h3{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--douce);margin:0 0 10px}
+.explication p{margin:0 0 10px;font-size:13.5px;color:var(--douce)}
+.explication p:last-child{margin-bottom:0}
+.pied{display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;
+  margin-top:26px;font-size:12.5px;color:var(--douce)}
+.pied a{color:#1a6e9e;text-decoration:none}
+
+@media (prefers-color-scheme:dark){
+  :root{--encre:#e9edf8;--douce:#98a3bf;--fond:#0c1020;--carte:#141a2f;--trait:#232b45;--muet:#2b3450}
+  .abonnement summary{background:#2b3768}
+  .banniere--degrade{color:#241800}
+}
+@media (max-width:560px){
+  .page{padding:22px 15px 44px}
+  /* Sur un téléphone, l'en-tête sur une ligne écrasait le nom du produit en
+     colonne de trois mots. On empile. */
+  .entete{flex-direction:column;align-items:stretch;gap:14px}
+  .abonnement summary{text-align:center}
+  .abonnement-corps{right:auto;left:0;width:min(340px,90vw)}
+  .barres{height:28px}
+  .meta{gap:20px}
+  .fenetre-note{text-align:left}
+  .echelle{font-size:10.5px}
+}

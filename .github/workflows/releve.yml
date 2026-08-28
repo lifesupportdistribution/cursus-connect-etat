@@ -1,0 +1,70 @@
+# Cursus Connect — relevé d'état de la PRODUCTION, toutes les 15 minutes.
+#
+# Pourquoi ce dépôt est PUBLIC : les minutes GitHub Actions sont facturées sur un
+# dépôt privé et gratuites sur un dépôt public. Une sonde au quart d'heure
+# consomme ~2 900 minutes par mois — impossible dans l'enveloppe incluse d'un
+# compte gratuit. Ici, elle ne coûte rien. Ce dépôt ne contient donc AUCUN code
+# applicatif et AUCUN secret : une sonde qui interroge une page publique n'en a
+# pas besoin, et c'est précisément ce qui permet de le rendre public.
+#
+# Deux effets, pas un :
+#   - le relevé est écrit dans public/historique.json et poussé ici. C'est
+#     l'historique que lit la page d'état ; versionné, il ne s'efface jamais,
+#     contrairement aux exécutions GitHub (90 jours).
+#   - si la production est en panne, ce workflow ÉCHOUE, et GitHub envoie un
+#     e-mail au propriétaire du dépôt. C'est l'alerte, et elle ne demande rien à
+#     configurer. (Vérifier une fois : Settings → Notifications → Actions.)
+#
+# L'ordre des étapes n'est pas décoratif : on enregistre le relevé AVANT de
+# signaler la panne. Une panne dont on ne garde pas la trace est une panne qu'on
+# ne pourra pas expliquer au client la semaine suivante.
+name: releve
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Deux relevés simultanés se disputeraient la poussée : on les met à la queue.
+concurrency:
+  group: releve
+  cancel-in-progress: false
+
+jobs:
+  relever:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Relever l'état de la production
+        id: releve
+        continue-on-error: true      # on enregistre le relevé MÊME (surtout) en panne
+        run: node scripts/relever.mjs
+
+      - name: Publier le relevé
+        run: |
+          git config user.name  "sonde"
+          git config user.email "actions@github.com"
+          git add public/historique.json
+          if git diff --cached --quiet; then
+            echo "rien de neuf à publier"
+          else
+            git commit -m "relevé $(date -u '+%Y-%m-%d %H:%M UTC')"
+            # Un relevé concurrent a pu passer devant : on se replace derrière lui
+            # plutôt que d'écraser son verdict.
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: Signaler la panne (c'est cet échec qui envoie l'e-mail)
+        if: steps.releve.outcome == 'failure'
+        run: |
+          echo "::error::La production ne répond pas normalement — voir l'étape « Relever »."
+          exit 1

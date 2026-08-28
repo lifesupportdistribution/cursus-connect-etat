@@ -1,0 +1,10 @@
+# Cursus Connect — en-têtes servis par Cloudflare Pages pour la page d'état.
+# Même exigence que le produit : aucun script en ligne, aucune ressource tierce.
+# Les deux seules origines distantes autorisées sont le service surveillé et le
+# dépôt public qui porte l'historique.
+/*
+  Content-Security-Policy: default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://cursusconnect.com https://raw.githubusercontent.com; form-action 'none'; upgrade-insecure-requests
+  Strict-Transport-Security: max-age=63072000; includeSubDomains
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  Permissions-Policy: geolocation=(), camera=(), microphone=(), payment=(), usb=()
