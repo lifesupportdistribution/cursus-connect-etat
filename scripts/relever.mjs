@@ -19,7 +19,7 @@
    Usage : node scripts/relever.mjs
    Variables : URL_SANTE, FICHIER (public/historique.json), FENETRE_JOURS (90),
                FUSEAU (Europe/Paris), ESSAIS (3), ATTENTE_MS (15000). */
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 const URL_SANTE = process.env.URL_SANTE || "https://cursusconnect.com/api/sante";
@@ -118,6 +118,7 @@ function cause(e) {
 
 const releve = await sonder();
 const h = charger();
+const majPrecedente = h.maj; // lu AVANT que le releve ne l'ecrase (chien de garde, plus bas)
 const jour = jourDe(new Date(releve.t));
 const limite = jourDe(new Date(Date.now() - (FENETRE - 1) * 86400000));
 
@@ -153,6 +154,16 @@ writeFileSync(FICHIER, JSON.stringify(h, null, 2) + "\n");
 const jJour = h.composants.application.jours[jour];
 console.log(`↳ ${FICHIER} : ${jour} → ${jJour.n - jJour.ko}/${jJour.n} relevés au vert, `
   + `${h.incidents.filter((i) => !i.fin).length} incident(s) ouvert(s).`);
+
+/* --- 2 bis. chien de garde du declencheur -------------------------------
+   Un Worker Cloudflare demande un releve tous les quarts d'heure. Si l'ecart
+   avec le releve precedent depasse le seuil, c'est lui qui est muet (jeton
+   expire, Worker supprime, panne Cloudflare) : le workflow le signale a part,
+   sans toucher au verdict de production ni aux incidents. */
+const ecartMin = majPrecedente
+  ? Math.round((Date.parse(releve.t) - Date.parse(majPrecedente)) / 60000) : 0;
+console.log(`ecart avec le releve precedent : ${ecartMin} min`);
+if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `ecart_min=${ecartMin}\n`);
 
 /* --- 3. alerter ---------------------------------------------------------- */
 if (!releve.application) {

@@ -18,6 +18,13 @@
 # L'ordre des étapes n'est pas décoratif : on enregistre le relevé AVANT de
 # signaler la panne. Une panne dont on ne garde pas la trace est une panne qu'on
 # ne pourra pas expliquer au client la semaine suivante.
+#
+# Le cron ci-dessous ne suffit pas : le planificateur de GitHub abandonne la
+# plupart de ses passages (6 a 7 par jour constates le 19.09.2026 au lieu de
+# 96). Le Worker Cloudflare cursus-connect-declencheur demande donc un releve
+# par workflow_dispatch tous les quarts d'heure. Le cron reste en filet et
+# sert de chien de garde : si plus de 60 min separent deux releves, la
+# derniere etape echoue et GitHub envoie l'e-mail.
 name: releve
 
 on:
@@ -69,4 +76,10 @@ jobs:
         if: steps.releve.outcome == 'failure'
         run: |
           echo "::error::La production ne répond pas normalement — voir l'étape « Relever »."
+          exit 1
+
+      - name: Signaler le declencheur muet (plus de 60 min entre deux releves)
+        if: ${{ !cancelled() && fromJSON(steps.releve.outputs.ecart_min || '0') > 60 }}
+        run: |
+          echo "::error::Declencheur muet : ${{ steps.releve.outputs.ecart_min }} min depuis le releve precedent (attendu 15). Verifier le Worker cursus-connect-declencheur et son jeton GITHUB_JETON."
           exit 1
