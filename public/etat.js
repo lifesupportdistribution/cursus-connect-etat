@@ -229,6 +229,27 @@ async function charger() {
   peindreIncidents();
 }
 
+/* Abonnement : copier l'adresse. Le lien mailto: ne fait rien sur un poste sans
+   logiciel de messagerie ; la copie marche partout. Repli par sélection si le
+   presse-papiers est refusé (navigateur ancien, contexte non sécurisé). */
+const boutonCopier = document.getElementById("copier-adresse");
+if (boutonCopier) {
+  boutonCopier.addEventListener("click", async () => {
+    const zone = document.getElementById("adresse-alertes");
+    const note = document.getElementById("copie-faite");
+    let copie = false;
+    try { await navigator.clipboard.writeText(zone.textContent.trim()); copie = true; }
+    catch (e) {
+      const plage = document.createRange(); plage.selectNodeContents(zone);
+      const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(plage);
+    }
+    note.textContent = copie
+      ? "Adresse copiée. Collez-la dans votre messagerie, avec le nom de votre centre et l'adresse à prévenir."
+      : "L'adresse est sélectionnée : copiez-la (Ctrl+C ou Cmd+C).";
+    note.hidden = false;
+  });
+}
+
 peindreComposants();
 peindreIncidents();
 sonder();
