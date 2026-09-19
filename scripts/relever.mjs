@@ -29,7 +29,7 @@ const FUSEAU = process.env.FUSEAU || "Europe/Paris";
 const ESSAIS = Number(process.env.ESSAIS || 3);
 const ATTENTE_MS = Number(process.env.ATTENTE_MS || 15000);
 
-const COMPOSANTS = ["application", "base", "stockage"];
+const COMPOSANTS = ["application", "base", "stockage", "courriel"];
 const jourDe = (d) => new Intl.DateTimeFormat("fr-CA",
   { timeZone: FUSEAU, year: "numeric", month: "2-digit", day: "2-digit" }).format(d); // AAAA-MM-JJ
 
@@ -56,15 +56,20 @@ async function sonder() {
         t: new Date().toISOString(),
         http,
         version: corps.version || null,
-        application: corps.etat === "ok",
+        /* [1.575.0] Trois états. « degrade » répond 200 : l'application SERT, un
+           composant est en défaut. L'incident public suit l'application ; le
+           composant en défaut rougit dans sa propre barre, et la vigie alerte. */
+        application: corps.etat === "ok" || corps.etat === "degrade",
+        degrade: corps.etat === "degrade",
         base: corps.base === "ok",
-        stockage: corps.stockage === "ok" || corps.stockage === "non configure",
+        stockage: corps.stockage === "ok" || (corps.stockage === "non configure" && corps.etat === "ok"),
+        courriel: corps.courriel === undefined ? null : corps.courriel === "ok", // null : pas mesuré
         schemaEnRetard: enRetard,
         joignable: true,
       };
       dernier = etat;
       if (etat.application) {
-        console.log(`✓ essai ${essai} : production en service (${etat.version})`);
+        console.log(`✓ essai ${essai} : production en service${etat.degrade ? ", DEGRADEE" : ""} (${etat.version})`);
         return etat;
       }
       console.log(`essai ${essai} : répond ${http} mais etat non-ok `
@@ -72,7 +77,7 @@ async function sonder() {
     } catch (e) {
       console.log(`essai ${essai} : injoignable — ${e && e.message ? e.message : e}`);
       dernier = { t: new Date().toISOString(), http: 0, version: null,
-        application: false, base: false, stockage: false, schemaEnRetard: false, joignable: false };
+        application: false, degrade: false, base: false, stockage: false, courriel: false, schemaEnRetard: false, joignable: false };
     }
     if (essai < ESSAIS) await dors(ATTENTE_MS);
   }
@@ -113,7 +118,10 @@ function cause(e) {
   if (!e.base) return "base de données indisponible";
   if (e.schemaEnRetard) return "maintenance de la base en cours";
   if (!e.stockage) return "stockage des fichiers indisponible";
-  return "service dégradé";
+  if (e.courriel === false) return "envoi des e-mails indisponible";
+  /* [1.575.0] « dégradé » a désormais un sens précis (l'application sert) : une
+     panne dont la cause n'est pas nommée plus haut est une indisponibilité. */
+  return "service indisponible";
 }
 
 const releve = await sonder();
@@ -123,6 +131,7 @@ const jour = jourDe(new Date(releve.t));
 const limite = jourDe(new Date(Date.now() - (FENETRE - 1) * 86400000));
 
 for (const c of COMPOSANTS) {
+  if (releve[c] === null || releve[c] === undefined) continue; // [1.575.0] composant non mesuré
   const jours = h.composants[c].jours;
   const j = jours[jour] || { n: 0, ko: 0 };
   j.n += 1;
@@ -166,6 +175,10 @@ console.log(`ecart avec le releve precedent : ${ecartMin} min`);
 if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `ecart_min=${ecartMin}\n`);
 
 /* --- 3. alerter ---------------------------------------------------------- */
+if (releve.degrade) {
+  // [1.575.0] Pas d'échec du workflow : l'application sert. La vigie a alerté par Pushover.
+  console.log("::warning::PRODUCTION DEGRADEE - l'application sert, un composant est en defaut (voir /api/sante).");
+}
 if (!releve.application) {
   console.log(`::error::PRODUCTION EN PANNE — ${cause(releve)} (après ${ESSAIS} essai${ESSAIS > 1 ? "s" : ""})`);
   process.exit(1);

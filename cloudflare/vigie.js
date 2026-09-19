@@ -83,9 +83,10 @@ function cause(c) {
   const l = [];
   if (c.base && c.base !== "ok") l.push(`base ${c.base}`);
   if (c.schema != null && c.schemaRequis != null && c.schema < c.schemaRequis) l.push(`schema ${c.schema}/${c.schemaRequis}`);
-  if (c.stockage && c.stockage !== "ok" && c.stockage !== "non configure") l.push(`stockage ${c.stockage}`);
+  if (c.stockage && c.stockage !== "ok") l.push(`stockage ${c.stockage}`);
   if (c.cloisonnement && c.cloisonnement !== "actif") l.push(`cloisonnement ${c.cloisonnement}`);
-  if (c.messagerie && c.messagerie !== "ok") l.push(`messagerie ${c.messagerie}`);
+  if (c.courriel && c.courriel !== "ok") l.push(`courriel ${c.courriel}`); // [1.575.0]
+  if (c.tls && c.tls !== "ca_fournie") l.push(`tls ${c.tls}`);
   return l.join(", ") || "cause non precisee par le bulletin";
 }
 
@@ -98,7 +99,7 @@ async function surveiller(env, nom, url, t) {
   if (releve.verdict === etat.verdict) {
     // Rien de neuf. Rappel horaire si la production reste en panne.
     if (etat.en_attente) await ecrireEtat(env, nom, { ...etat, en_attente: null, compte: 0, maj: maintenant });
-    if (nom === "production" && etat.verdict !== "ok" && Date.now() - Date.parse(etat.derniere_alerte || 0) >= RAPPEL_MS) {
+    if (nom === "production" && etat.verdict !== "ok" && t.getTime() - Date.parse(etat.derniere_alerte || 0) >= RAPPEL_MS) {
       await pushover(env, `Cursus Connect - ${nom}`,
         `Toujours ${libelle(etat.verdict)} depuis ${heureLocale(etat.depuis)} (${duree(etat.depuis, maintenant)}). ${releve.detail}`.trim(), 1);
       await ecrireEtat(env, nom, { ...etat, derniere_alerte: maintenant, maj: maintenant });

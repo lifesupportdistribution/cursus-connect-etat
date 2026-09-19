@@ -22,7 +22,7 @@ globalThis.fetch = async (url, o = {}) => {
 };
 const OK = { status: 200, corps: { version: "1.574.7", etat: "ok", base: "ok", stockage: "ok", cloisonnement: "actif", schema: 14, schemaRequis: 14 } };
 const KO = { status: 503, corps: { version: "1.574.7", etat: "hors service", base: "indisponible", stockage: "ok", cloisonnement: "actif", schema: 14, schemaRequis: 14 } };
-const DEG = { status: 200, corps: { version: "1.575.0", etat: "degrade", base: "ok", stockage: "ok", cloisonnement: "actif", messagerie: "indisponible" } };
+const DEG = { status: 200, corps: { version: "1.575.0", etat: "degrade", base: "ok", stockage: "ok", cloisonnement: "actif", courriel: "indisponible" } };
 const env = { SONDE_PRODUCTION_URL: "https://prod/api/sante", SONDE_TEST_URL: "https://test/api/sante", GITHUB_JETON: "g", PUSHOVER_JETON: "p", PUSHOVER_UTILISATEUR: "u", ETAT: D1 };
 const tick = (iso) => w.scheduled({ scheduledTime: Date.parse(iso) }, env, {});
 const pushs = () => appels.filter((a) => a.pushover).map((a) => a.pushover);
@@ -43,7 +43,7 @@ assert.match(p[0].message, /HORS SERVICE depuis 12:10/); assert.match(p[0].messa
 // 4. minute suivante : silence
 await tick("2026-09-19T10:11:00Z"); assert.equal(pushs().length, 0); ok("panne qui dure : pas de nouvelle alerte a la minute"); raz();
 // 5. une heure plus tard : rappel haute (le rappel compare a l'horloge reelle -> on antidate derniere_alerte)
-table.get("production").derniere_alerte = new Date(Date.now() - 61 * 60000).toISOString();
+table.get("production").derniere_alerte = "2026-09-19T10:10:00.000Z"; // [v2] temps simule : 61 min avant 11:11
 await tick("2026-09-19T11:11:00Z"); p = pushs(); assert.equal(p.length, 1); assert.equal(p[0].priority, "1"); assert.match(p[0].message, /Toujours hors service/); ok("apres 1 h : rappel priorite haute"); raz();
 // 6. retablissement : 2 releves ok, puis priorite normale avec duree
 reponses["https://prod/api/sante"] = OK;
@@ -54,13 +54,13 @@ reponses["https://prod/api/sante"] = "timeout"; await tick("2026-09-19T11:14:00Z
 reponses["https://prod/api/sante"] = OK; await tick("2026-09-19T11:15:00Z"); assert.equal(pushs().length, 0); assert.equal(table.get("production").en_attente, null); ok("hoquet isole : aucune alerte, attente effacee"); raz();
 // 8. degrade -> priorite haute
 reponses["https://prod/api/sante"] = DEG; await tick("2026-09-19T11:16:00Z"); await tick("2026-09-19T11:17:00Z");
-p = pushs(); assert.equal(p.length, 1); assert.equal(p[0].priority, "1"); assert.match(p[0].message, /DEGRADE/); assert.match(p[0].message, /messagerie indisponible/); ok("degrade : priorite haute, cause messagerie"); raz();
+p = pushs(); assert.equal(p.length, 1); assert.equal(p[0].priority, "1"); assert.match(p[0].message, /DEGRADE/); assert.match(p[0].message, /courriel indisponible/); ok("degrade : priorite haute, cause courriel"); raz();
 reponses["https://prod/api/sante"] = OK; await tick("2026-09-19T11:18:00Z"); await tick("2026-09-19T11:19:00Z"); raz();
 // 9. test : sonde aux multiples de 5 seulement, priorite 0
 reponses["https://test/api/sante"] = "reseau";
 await tick("2026-09-19T11:21:00Z"); assert.equal(appels.filter((a) => a.url.startsWith("https://test")).length, 0); ok("test : pas sonde hors multiples de 5"); raz();
 await tick("2026-09-19T11:25:00Z"); await tick("2026-09-19T11:30:00Z"); p = pushs(); assert.equal(p.length, 1); assert.equal(p[0].priority, "0"); assert.match(p[0].title, /test/); assert.match(p[0].message, /INJOIGNABLE/); ok("test : alerte apres 2 sondes, priorite normale"); raz();
-table.get("test").derniere_alerte = new Date(Date.now() - 120 * 60000).toISOString();
+table.get("test").derniere_alerte = "2026-09-19T09:30:00.000Z"; // [v2] temps simule
 await tick("2026-09-19T11:35:00Z"); assert.equal(pushs().length, 0); ok("test : pas de rappel horaire"); raz();
 // 10. Pushover en panne : l'etat n'est pas ecrit, la minute suivante reessaie
 reponses["https://prod/api/sante"] = KO; await tick("2026-09-19T11:36:00Z");

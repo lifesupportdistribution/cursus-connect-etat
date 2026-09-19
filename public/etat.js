@@ -28,6 +28,7 @@ const COMPOSANTS = [
   { cle: "application", nom: "Application" },
   { cle: "base", nom: "Base de données" },
   { cle: "stockage", nom: "Stockage des fichiers" },
+  { cle: "courriel", nom: "Envoi des e-mails" },           // [1.575.0]
 ];
 
 let vivant = null;      // dernier sondage navigateur
@@ -41,15 +42,19 @@ async function sonder() {
     const corps = await r.json();   // 503 porte le MÊME corps : on le lit aussi
     vivant = {
       joignable: true,
-      application: corps.etat === "ok",
+      /* [1.575.0] Trois états : « degrade » = l'application sert, un composant
+         est en défaut. Un bulletin plus ancien ne mesure pas l'envoi des e-mails. */
+      application: corps.etat === "ok" || corps.etat === "degrade",
+      degrade: corps.etat === "degrade",
       base: corps.base === "ok",
-      stockage: corps.stockage === "ok" || corps.stockage === "non configure",
+      stockage: corps.stockage === "ok" || (corps.stockage === "non configure" && corps.etat === "ok"),
+      courriel: corps.courriel === undefined ? true : corps.courriel === "ok",
       version: corps.version || null,
     };
   } catch {
     /* Injoignable. Ce n'est pas forcément la faute du service : la connexion du
        visiteur peut être coupée. On le dit, plutôt que d'accuser à tort. */
-    vivant = { joignable: false, application: false, base: false, stockage: false, version: null };
+    vivant = { joignable: false, application: false, degrade: false, base: false, stockage: false, courriel: false, version: null };
   }
   $("m-controle").textContent = dateHeure(new Date());
   $("m-version").textContent = vivant.version || "—";
@@ -65,12 +70,19 @@ function peindreBanniere() {
     classe = "panne"; titre = "Service injoignable";
     detail = "Votre navigateur n'a pas pu joindre Cursus Connect. Si le reste de votre connexion "
            + "fonctionne, le service est probablement en panne : nous en sommes prévenus automatiquement.";
-  } else if (vivant.application) {
+  } else if (vivant.application && !vivant.degrade) {
     classe = "ok"; titre = "Tous les services fonctionnent";
     detail = "Aucun incident en cours sur la production.";
-  } else if (vivant.base && vivant.stockage) {
+  } else if (vivant.application) {
+    /* [1.575.0] L'application sert : on nomme ce qui ne marche pas, sans rien
+       dire de ce qui ne regarde pas le visiteur (protections internes). */
+    const enDefaut = COMPOSANTS.filter((c) => c.cle !== "application" && !vivant[c.cle])
+      .map((c) => c.nom.toLowerCase());
     classe = "degrade"; titre = "Service dégradé";
-    detail = "L'application répond, mais l'un de ses composants ne fonctionne pas normalement.";
+    detail = "L'application fonctionne, mais "
+      + (enDefaut.length ? enDefaut.join(" et ") + (enDefaut.length > 1 ? " sont" : " est") + " en défaut"
+                         : "l'un de ses composants internes est en défaut")
+      + ". Nous en sommes prévenus automatiquement.";
   } else {
     classe = "panne"; titre = "Incident en cours";
     detail = "Le service ne fonctionne pas normalement. Nos équipes en sont prévenues automatiquement.";
