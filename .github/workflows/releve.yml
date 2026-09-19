@@ -56,7 +56,9 @@ jobs:
           if git diff --cached --quiet; then
             echo "rien de neuf à publier"
           else
-            git commit -m "relevé $(date -u '+%Y-%m-%d %H:%M UTC')"
+            # [CF-Pages-Skip] en tete : Cloudflare Pages ne reconstruit pas la page pour un
+            # simple releve (500 constructions/mois en offre gratuite, 96 releves/jour).
+            git commit -m "[CF-Pages-Skip] relevé $(date -u '+%Y-%m-%d %H:%M UTC')"
             # Un relevé concurrent a pu passer devant : on se replace derrière lui
             # plutôt que d'écraser son verdict.
             git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
