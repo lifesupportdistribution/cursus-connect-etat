@@ -1,14 +1,21 @@
-// Cursus Connect - vigie (Worker Cloudflare). Lot F du chantier sante et alertes.
+// Cursus Connect - vigie (Worker Cloudflare). Chantier sante et alertes, lots F et V3.
 //
 // Chaque minute :
 //   1. sonde la production (SONDE_PRODUCTION_URL) et, aux minutes multiples de 5,
-//      le test (SONDE_TEST_URL, facultatif) ;
+//      le test (SONDE_TEST_URL, facultatif) ; mesure la duree de reponse ;
 //   2. ne declare un changement d'etat qu'apres CONFIRMATIONS releves identiques
 //      d'affilee ; une alerte Pushover par transition, un rappel par heure tant
-//      que la panne dure (production seulement) ;
+//      que la panne dure (production seulement) ; chaque transition est journalisee ;
 //   3. aux minutes 07, 22, 37, 52, demande a GitHub le releve de releve.yml
-//      (workflow_dispatch), qui tient l'historique et la page d'etat ;
-//   4. a 06:00 UTC, envoie une preuve de vie muette (priorite -2).
+//      (workflow_dispatch), qui tient l'historique et la page d'etat publique ;
+//   4. a la minute 30 de chaque heure, verifie que les taches planifiees du
+//      produit ont donne signe de vie (purges, sauvegardes) ;
+//   5. a 06:00 UTC, verifie les echeances (cles, jetons, domaine) et envoie une
+//      preuve de vie muette.
+//
+// Et sur demande (fetch) :
+//   POST /signal   le produit se signale lui-meme (taches, anomalies) ; jeton Bearer
+//   GET  /         le tableau de bord de l'exploitant ; authentification Basic
 //
 // Aucun secret ni adresse dans ce fichier : tout vient des variables du Worker.
 //   SONDE_PRODUCTION_URL  texte    bulletin public de la production
@@ -16,26 +23,46 @@
 //   GITHUB_JETON          secret   jeton fin, depot cursus-connect-etat seul, Actions RW
 //   PUSHOVER_JETON        secret   jeton de l'application Pushover
 //   PUSHOVER_UTILISATEUR  secret   cle d'utilisateur Pushover
+//   VIGIE_SIGNAL_JETON    secret   partage avec le produit (Vercel) ; absent = /signal ferme
+//   VIGIE_TABLEAU_MDP     secret   mot de passe du tableau de bord ; absent = tableau ferme
 //   ETAT                  D1       base "cursus-connect-vigie" (coherence forte :
 //                                  KV est a coherence differee, jusqu'a 60 s, ce qui
 //                                  ferait doubler les alertes)
 //
 // Etats : ok | degrade | hors_service | injoignable. Priorites Pushover, production :
 //   hors_service, injoignable -> 2 (urgence : sonne jusqu'a accuse de reception)
-//   degrade                   -> 1 (haute : sonne, meme en heures calmes)
-//   retour a ok               -> 0 ; rappel horaire tant que ca dure -> 1
+//   degrade, tache en retard ou en echec, anomalie, echeance proche -> 1 (haute)
+//   retour a ok -> 0 ; rappel horaire tant que ca dure -> 1
 //   test : 0 pour tout, sans rappel. Preuve de vie : -2 (muette).
 
 const DEPOT = "lifesupportdistribution/cursus-connect-etat";
 const WORKFLOW = "releve.yml";
 const BRANCHE = "main";
 const MINUTES_DECLENCHEMENT = [7, 22, 37, 52];
+const MINUTE_TACHES = 30;
 const MINUTE_PREUVE_DE_VIE = { h: 6, m: 0 }; // UTC
 const CONFIRMATIONS = 2;        // releves identiques d'affilee avant de changer d'etat
 const RAPPEL_MS = 60 * 60 * 1000;
 const DELAI_SONDE_MS = 10000;
 const HISTORIQUE_URL = `https://raw.githubusercontent.com/${DEPOT}/${BRANCHE}/public/historique.json`;
 const FUSEAU = "Europe/Paris";
+const MESURES_JOURS = 7;
+
+// Taches planifiees du produit (vercel.json) : delai au-dela duquel leur silence
+// est une anomalie. purges : 03:00 UTC chaque jour. sauvegardes : 10:00 et 16:00
+// UTC, le plus long silence normal va de 16:00 a 10:00 (18 h).
+const TACHES = { purges: 26, sauvegardes: 20 };
+const RAPPEL_TACHE_MS = 6 * 60 * 60 * 1000;
+const ANTI_RAFALE_ANOMALIE_MS = 60 * 60 * 1000;
+
+// Echeances connues, sans lien avec une API : a tenir a jour a chaque rotation
+// (journal des rotations). Le domaine est lu en direct (RDAP).
+const ECHEANCES_FIXES = [
+  { cle: "scaleway", nom: "Cle API Scaleway (envoi des e-mails, test et production)", date: "2027-09-16" },
+  { cle: "github", nom: "Jeton GitHub de la vigie", date: "2027-09-19" },
+];
+const DOMAINES = ["cursusconnect.com"];
+const PREAVIS_JOURS = 30;
 
 export default {
   async scheduled(controller, env, ctx) {
@@ -44,17 +71,51 @@ export default {
     const erreurs = [];
     const tache = async (nom, f) => { try { await f(); } catch (e) { console.error(`${nom} : ${e.message}`); erreurs.push(`${nom} : ${e.message}`); } };
 
+    await tache("schema", () => preparer(env));
     await tache("sonde production", () => surveiller(env, "production", env.SONDE_PRODUCTION_URL, t));
     if (env.SONDE_TEST_URL && minute % 5 === 0) await tache("sonde test", () => surveiller(env, "test", env.SONDE_TEST_URL, t));
     if (MINUTES_DECLENCHEMENT.includes(minute)) await tache("declenchement GitHub", () => declencherReleve(env));
-    if (heure === MINUTE_PREUVE_DE_VIE.h && minute === MINUTE_PREUVE_DE_VIE.m) await tache("preuve de vie", () => preuveDeVie(env, t));
+    if (minute === MINUTE_TACHES) await tache("taches planifiees", () => verifierTaches(env, t));
+    if (heure === MINUTE_PREUVE_DE_VIE.h && minute === MINUTE_PREUVE_DE_VIE.m) {
+      await tache("echeances", () => verifierEcheances(env, t));
+      await tache("preuve de vie", () => preuveDeVie(env, t));
+      await tache("menage", () => menage(env, t));
+    }
 
     if (erreurs.length) throw new Error(erreurs.join(" | ")); // marque l'invocation en echec dans les journaux
   },
 
-  // Aucune page a servir.
-  async fetch() { return new Response("", { status: 404 }); },
+  async fetch(requete, env) {
+    const url = new URL(requete.url);
+    try {
+      if (url.pathname === "/signal" && requete.method === "POST") return await recevoirSignal(requete, env, new Date());
+      if (url.pathname === "/" && requete.method === "GET") return await tableau(requete, env, new Date());
+    } catch (e) {
+      console.error(`fetch ${url.pathname} : ${e.message}`);
+      return new Response("", { status: 500 });
+    }
+    return new Response("", { status: 404 });
+  },
 };
+
+/* --- schema D1 (cree a la premiere invocation, sans migration a jouer) ------ */
+let _prepare = false;
+async function preparer(env) {
+  if (_prepare) return;
+  await env.ETAT.batch([
+    env.ETAT.prepare(`CREATE TABLE IF NOT EXISTS etat (env TEXT PRIMARY KEY, verdict TEXT, depuis TEXT,
+      en_attente TEXT, compte INTEGER, derniere_alerte TEXT, detail TEXT, maj TEXT)`),
+    env.ETAT.prepare(`CREATE TABLE IF NOT EXISTS transitions (id INTEGER PRIMARY KEY AUTOINCREMENT,
+      env TEXT, de TEXT, vers TEXT, t TEXT, detail TEXT)`),
+    env.ETAT.prepare(`CREATE TABLE IF NOT EXISTS mesures (env TEXT, heure TEXT, n INTEGER, ko INTEGER,
+      ms_total INTEGER, ms_max INTEGER, PRIMARY KEY (env, heure))`),
+    env.ETAT.prepare(`CREATE TABLE IF NOT EXISTS signaux (cle TEXT PRIMARY KEY, env TEXT, type TEXT, nom TEXT,
+      ok INTEGER, detail TEXT, t TEXT, derniere_alerte TEXT, compte INTEGER)`),
+    env.ETAT.prepare(`CREATE TABLE IF NOT EXISTS echeances (cle TEXT PRIMARY KEY, nom TEXT, date TEXT,
+      source TEXT, verifie TEXT, derniere_alerte TEXT)`),
+  ]);
+  _prepare = true;
+}
 
 /* --- 1. sonder ------------------------------------------------------------- */
 export async function sonder(url) {
@@ -93,6 +154,7 @@ function cause(c) {
 /* --- 2. suivre l'etat et alerter aux transitions ---------------------------- */
 async function surveiller(env, nom, url, t) {
   const releve = await sonder(url);
+  await mesurer(env, nom, t, releve);
   const etat = await lireEtat(env, nom);
   const maintenant = t.toISOString();
 
@@ -124,16 +186,28 @@ async function surveiller(env, nom, url, t) {
   await pushover(env, `Cursus Connect - ${nom}`, message, priorite);
   await ecrireEtat(env, nom, { verdict: releve.verdict, depuis: maintenant, en_attente: null, compte: 0,
                                derniere_alerte: maintenant, detail: releve.detail, maj: maintenant });
+  await env.ETAT.prepare("INSERT INTO transitions (env, de, vers, t, detail) VALUES (?, ?, ?, ?, ?)")
+    .bind(nom, etat.verdict, releve.verdict, maintenant, releve.detail || "").run();
+}
+
+// Une ligne par heure et par environnement : nombre de releves, releves non ok,
+// durees. Sept jours gardes : de quoi voir une lenteur s'installer.
+async function mesurer(env, nom, t, releve) {
+  const heure = t.toISOString().slice(0, 13) + ":00Z";
+  const ko = releve.verdict === "ok" ? 0 : 1;
+  await env.ETAT.prepare(`INSERT INTO mesures (env, heure, n, ko, ms_total, ms_max) VALUES (?, ?, 1, ?, ?, ?)
+    ON CONFLICT(env, heure) DO UPDATE SET n = n + 1, ko = ko + excluded.ko,
+    ms_total = ms_total + excluded.ms_total, ms_max = MAX(ms_max, excluded.ms_max)`)
+    .bind(nom, heure, ko, releve.ms || 0, releve.ms || 0).run();
 }
 
 const libelle = (v) => ({ ok: "en service", degrade: "degrade", hors_service: "hors service", injoignable: "injoignable" }[v] || v);
 const duree = (a, b) => { const m = Math.max(0, Math.round((Date.parse(b) - Date.parse(a)) / 60000)); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")}`; };
 const heureLocale = (iso) => new Intl.DateTimeFormat("fr-FR", { timeZone: FUSEAU, hour: "2-digit", minute: "2-digit" }).format(new Date(iso));
+const dateLocale = (iso) => new Intl.DateTimeFormat("fr-FR", { timeZone: FUSEAU, day: "2-digit", month: "2-digit", year: "numeric" }).format(new Date(iso));
 
 /* --- etat en D1 ------------------------------------------------------------- */
 async function lireEtat(env, nom) {
-  await env.ETAT.prepare(`CREATE TABLE IF NOT EXISTS etat (env TEXT PRIMARY KEY, verdict TEXT, depuis TEXT,
-    en_attente TEXT, compte INTEGER, derniere_alerte TEXT, detail TEXT, maj TEXT)`).run();
   const l = await env.ETAT.prepare("SELECT * FROM etat WHERE env = ?").bind(nom).first();
   return l || { verdict: "ok", depuis: new Date().toISOString(), en_attente: null, compte: 0, derniere_alerte: null, detail: "", maj: null };
 }
@@ -168,7 +242,121 @@ async function declencherReleve(env) {
   console.log(`dispatch accepte : HTTP ${r.status}`);
 }
 
-/* --- 4. preuve de vie ------------------------------------------------------------ */
+/* --- signaux du produit ---------------------------------------------------------- */
+// Le produit se signale lui-meme : une tache planifiee qui se termine (ok ou non),
+// une anomalie vue en usage reel (un courriel refuse...). Le jeton est partage avec
+// Vercel ; comparaison a temps constant. Rien de ce qui arrive ici n'est cru sur
+// parole au-dela de sa forme : environnement connu, nom court, detail tronque.
+const FORME_NOM = /^[a-z0-9_-]{1,40}$/;
+export async function recevoirSignal(requete, env, t) {
+  const attendu = env.VIGIE_SIGNAL_JETON || "";
+  if (!attendu) return new Response("", { status: 404 });
+  const recu = (requete.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
+  if (!egal(recu, attendu)) return new Response("", { status: 401 });
+  let s; try { s = await requete.json(); } catch { return new Response("", { status: 400 }); }
+  const envNom = s && s.env, type = s && s.type, nom = s && s.nom;
+  if (!["production", "test"].includes(envNom) || !["tache", "anomalie"].includes(type) || !FORME_NOM.test(nom || "")
+      || typeof s.ok !== "boolean") return new Response("", { status: 400 });
+  const detail = String(s.detail || "").replace(/[\r\n]+/g, " ").slice(0, 300);
+  await preparer(env);
+  const cle = `${envNom}:${type}:${nom}`;
+  const avant = await env.ETAT.prepare("SELECT * FROM signaux WHERE cle = ?").bind(cle).first();
+  const maintenant = t.toISOString();
+  let derniereAlerte = avant ? avant.derniere_alerte : null;
+  let compte = avant ? avant.compte || 0 : 0;
+  const priorite = envNom === "production" ? 1 : 0;
+  const titre = `Cursus Connect - ${envNom}`;
+
+  if (!s.ok) {
+    compte = avant && !avant.ok ? compte + 1 : 1;
+    // Premiere occurrence : alerte tout de suite. Ensuite, une par heure au plus.
+    const silence = derniereAlerte && avant && !avant.ok && t.getTime() - Date.parse(derniereAlerte) < ANTI_RAFALE_ANOMALIE_MS;
+    if (!silence) {
+      const quoi = type === "tache" ? `La tache planifiee « ${nom} » a echoue` : `Anomalie « ${nom} »`;
+      await pushover(env, titre, `${quoi} a ${heureLocale(maintenant)}${compte > 1 ? ` (${compte} fois depuis la premiere alerte)` : ""}. ${detail}`.trim(), priorite);
+      derniereAlerte = maintenant;
+    }
+  } else if (avant && !avant.ok) {
+    const quoi = type === "tache" ? `La tache planifiee « ${nom} » a de nouveau reussi` : `Anomalie « ${nom} » resolue`;
+    await pushover(env, titre, `${quoi} a ${heureLocale(maintenant)}.`, 0);
+    derniereAlerte = null; compte = 0;
+  } else if (avant && avant.derniere_alerte && type === "tache") {
+    // Une tache qui avait ete signalee en retard vient de repasser.
+    await pushover(env, titre, `La tache planifiee « ${nom} » a repris a ${heureLocale(maintenant)}.`, 0);
+    derniereAlerte = null;
+  }
+  await env.ETAT.prepare(`INSERT INTO signaux (cle, env, type, nom, ok, detail, t, derniere_alerte, compte)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(cle) DO UPDATE SET ok = excluded.ok, detail = excluded.detail,
+    t = excluded.t, derniere_alerte = excluded.derniere_alerte, compte = excluded.compte`)
+    .bind(cle, envNom, type, nom, s.ok ? 1 : 0, detail, maintenant, derniereAlerte, compte).run();
+  return new Response(null, { status: 204 }); // 204 : corps nul exige (un corps vide "" leve une erreur)
+}
+
+function egal(a, b) {
+  const ea = new TextEncoder().encode(a), eb = new TextEncoder().encode(b);
+  if (ea.length !== eb.length) return false;
+  let d = 0; for (let i = 0; i < ea.length; i++) d |= ea[i] ^ eb[i];
+  return d === 0;
+}
+
+/* --- 4. taches planifiees : leur silence est une anomalie ------------------------- */
+// On ne surveille une tache qu'apres son premier signe de vie : pas de fausse alerte
+// le jour ou le produit apprend a se signaler.
+async function verifierTaches(env, t) {
+  const { results } = await env.ETAT.prepare("SELECT * FROM signaux WHERE type = 'tache'").all();
+  for (const s of results || []) {
+    const maxH = TACHES[s.nom]; if (!maxH) continue;
+    const silenceMs = t.getTime() - Date.parse(s.t);
+    if (silenceMs < maxH * 3600000) continue;
+    if (s.derniere_alerte && t.getTime() - Date.parse(s.derniere_alerte) < RAPPEL_TACHE_MS) continue;
+    await pushover(env, `Cursus Connect - ${s.env}`,
+      `La tache planifiee « ${s.nom} » n'a pas tourne depuis ${duree(s.t, t.toISOString())} (attendu : moins de ${maxH} h).`,
+      s.env === "production" ? 1 : 0);
+    await env.ETAT.prepare("UPDATE signaux SET derniere_alerte = ? WHERE cle = ?").bind(t.toISOString(), s.cle).run();
+  }
+}
+
+/* --- 5. echeances -------------------------------------------------------------------- */
+async function echeanceDomaine(domaine) {
+  const r = await fetch(`https://rdap.org/domain/${domaine}`, { headers: { Accept: "application/rdap+json" } });
+  if (!r.ok) throw new Error(`RDAP ${domaine} : HTTP ${r.status}`);
+  const d = await r.json();
+  const e = (d.events || []).find((x) => x.eventAction === "expiration");
+  if (!e) throw new Error(`RDAP ${domaine} : pas de date d'expiration`);
+  return e.eventDate.slice(0, 10);
+}
+export async function verifierEcheances(env, t) {
+  const liste = ECHEANCES_FIXES.map((e) => ({ ...e, source: "journal des rotations" }));
+  for (const d of DOMAINES) {
+    try { liste.push({ cle: `domaine:${d}`, nom: `Nom de domaine ${d}`, date: await echeanceDomaine(d), source: "RDAP" }); }
+    catch (e) {
+      const connu = await env.ETAT.prepare("SELECT * FROM echeances WHERE cle = ?").bind(`domaine:${d}`).first();
+      if (connu) liste.push({ ...connu, source: "RDAP (derniere lecture)" });
+      console.error(e.message);
+    }
+  }
+  for (const e of liste) {
+    const jours = Math.floor((Date.parse(e.date + "T00:00:00Z") - t.getTime()) / 86400000);
+    const connu = await env.ETAT.prepare("SELECT derniere_alerte FROM echeances WHERE cle = ?").bind(e.cle).first();
+    let derniere = connu ? connu.derniere_alerte : null;
+    if (jours <= PREAVIS_JOURS) {
+      // Une fois par semaine au-dela de 7 jours, chaque jour ensuite.
+      const periode = (jours <= 7 ? 1 : 7) * 86400000 - 3600000;
+      if (!derniere || t.getTime() - Date.parse(derniere) >= periode) {
+        await pushover(env, "Cursus Connect - echeance",
+          jours < 0 ? `${e.nom} : ECHUE depuis ${-jours} jour(s) (${dateLocale(e.date)}).`
+                    : `${e.nom} : expire dans ${jours} jour(s), le ${dateLocale(e.date)}. A renouveler.`, 1);
+        derniere = t.toISOString();
+      }
+    } else derniere = null;
+    await env.ETAT.prepare(`INSERT INTO echeances (cle, nom, date, source, verifie, derniere_alerte) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(cle) DO UPDATE SET nom = excluded.nom, date = excluded.date, source = excluded.source,
+      verifie = excluded.verifie, derniere_alerte = excluded.derniere_alerte`)
+      .bind(e.cle, e.nom, e.date, e.source, t.toISOString(), derniere).run();
+  }
+}
+
+/* --- preuve de vie, menage ------------------------------------------------------------ */
 async function preuveDeVie(env, t) {
   const prod = await lireEtat(env, "production");
   const lignes = [`Production : ${libelle(prod.verdict)} depuis ${duree(prod.depuis, t.toISOString())}.`];
@@ -180,4 +368,84 @@ async function preuveDeVie(env, t) {
     lignes.push(j ? `Hier, GitHub : ${j.n} releves, ${j.ko} au rouge.` : "Hier, GitHub : aucun releve trouve.");
   } catch (e) { lignes.push("Historique GitHub illisible."); }
   await pushover(env, "Cursus Connect - vigie", lignes.join(" "), -2);
+}
+async function menage(env, t) {
+  const limite = new Date(t.getTime() - MESURES_JOURS * 86400000).toISOString().slice(0, 13) + ":00Z";
+  await env.ETAT.prepare("DELETE FROM mesures WHERE heure < ?").bind(limite).run();
+  await env.ETAT.prepare("DELETE FROM transitions WHERE id NOT IN (SELECT id FROM transitions ORDER BY id DESC LIMIT 200)").run();
+}
+
+/* --- tableau de bord ------------------------------------------------------------------- */
+// Il vit ICI et non dans le produit : le jour ou le produit tombe, c'est la que
+// l'exploitant regarde. Authentification Basic (utilisateur « lsd »), mot de passe
+// en secret du Worker, comparaison a temps constant ; sans mot de passe configure,
+// la page n'existe pas.
+export async function tableau(requete, env, t) {
+  const mdp = env.VIGIE_TABLEAU_MDP || "";
+  if (!mdp) return new Response("", { status: 404 });
+  const auth = requete.headers.get("Authorization") || "";
+  let ok = false;
+  if (auth.startsWith("Basic ")) {
+    try { ok = egal(atob(auth.slice(6)), `lsd:${mdp}`); } catch { ok = false; }
+  }
+  if (!ok) return new Response("Authentification requise", { status: 401,
+    headers: { "WWW-Authenticate": 'Basic realm="Cursus Connect - vigie", charset="UTF-8"' } });
+  await preparer(env);
+  const q = async (sql, ...b) => (await env.ETAT.prepare(sql).bind(...b).all()).results || [];
+  const etats = await q("SELECT * FROM etat ORDER BY env");
+  const depuis24 = new Date(t.getTime() - 24 * 3600000).toISOString().slice(0, 13) + ":00Z";
+  const mesures = await q("SELECT * FROM mesures WHERE heure >= ? ORDER BY env, heure", depuis24);
+  const transitions = await q("SELECT * FROM transitions ORDER BY id DESC LIMIT 20");
+  const signaux = await q("SELECT * FROM signaux ORDER BY env, type, nom");
+  const echeances = await q("SELECT * FROM echeances ORDER BY date");
+  return new Response(pageTableau({ t, etats, mesures, transitions, signaux, echeances }), {
+    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
+               "X-Robots-Tag": "noindex", "Referrer-Policy": "no-referrer" } });
+}
+
+const echapper = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const COULEUR = { ok: "#1d7a46", degrade: "#b7791f", hors_service: "#b3261e", injoignable: "#b3261e" };
+const dateHeure = (iso) => iso ? new Intl.DateTimeFormat("fr-FR", { timeZone: FUSEAU, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(iso)) : "-";
+
+export function pageTableau({ t, etats, mesures, transitions, signaux, echeances }) {
+  const carte = (e) => {
+    const m = mesures.filter((x) => x.env === e.env);
+    const n = m.reduce((a, x) => a + x.n, 0), ko = m.reduce((a, x) => a + x.ko, 0);
+    const moy = n ? Math.round(m.reduce((a, x) => a + x.ms_total, 0) / n) : 0;
+    const max = m.reduce((a, x) => Math.max(a, x.ms_max), 0);
+    const barres = m.map((x) => `<span title="${echapper(dateHeure(x.heure))} : ${x.n} relevés, ${x.ko} en défaut, ${Math.round(x.ms_total / x.n)} ms" style="background:${x.ko ? "#b3261e" : "#1d7a46"};opacity:${x.ko ? 1 : 0.35 + Math.min(0.65, x.ms_total / x.n / 3000)}"></span>`).join("");
+    return `<section class="carte"><h2>${echapper(e.env)}</h2>
+      <p class="verdict" style="color:${COULEUR[e.verdict] || "#444"}">${echapper(libelle(e.verdict))}</p>
+      <p>depuis ${echapper(dateHeure(e.depuis))}${e.detail ? ` — ${echapper(e.detail)}` : ""}${e.en_attente ? ` · <b>${echapper(e.en_attente)} en confirmation</b>` : ""}</p>
+      <p>24 h : ${n} relevés, ${ko} en défaut · réponse moyenne ${moy} ms, pire ${max} ms</p>
+      <div class="barres">${barres}</div></section>`;
+  };
+  const ligneSignal = (s) => {
+    const maxH = s.type === "tache" ? TACHES[s.nom] : null;
+    const enRetard = maxH && t.getTime() - Date.parse(s.t) > maxH * 3600000;
+    const etat = !s.ok ? "en échec" : enRetard ? "en retard" : "ok";
+    return `<tr><td>${echapper(s.env)}</td><td>${echapper(s.type)}</td><td>${echapper(s.nom)}</td>
+      <td style="color:${etat === "ok" ? "#1d7a46" : "#b3261e"}">${etat}</td><td>${echapper(dateHeure(s.t))}</td><td>${echapper(s.detail)}</td></tr>`;
+  };
+  const ligneEcheance = (e) => {
+    const j = Math.floor((Date.parse(e.date + "T00:00:00Z") - t.getTime()) / 86400000);
+    return `<tr><td>${echapper(e.nom)}</td><td>${echapper(dateLocale(e.date))}</td>
+      <td style="color:${j <= PREAVIS_JOURS ? "#b3261e" : "#1d7a46"}">${j} j</td><td>${echapper(e.source)}</td></tr>`;
+  };
+  return `<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="60"><title>Cursus Connect — vigie</title><style>
+body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0;background:#f4f6fa;color:#1b1f2a}
+header{background:#29327a;color:#fff;padding:14px 20px}header h1{margin:0;font-size:18px}header p{margin:4px 0 0;opacity:.8;font-size:13px}
+main{padding:16px 20px;max-width:1100px}.cartes{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+.carte,.bloc{background:#fff;border-radius:10px;padding:14px 16px;box-shadow:0 1px 3px #0001;margin-bottom:14px}
+h2{margin:0 0 6px;font-size:15px;color:#29327a}.carte h2{text-transform:capitalize}.verdict{font-size:22px;font-weight:700;margin:4px 0}
+.barres{display:flex;gap:2px;height:28px;align-items:stretch}.barres span{flex:1;border-radius:2px}
+table{border-collapse:collapse;width:100%;font-size:13px}td,th{text-align:left;padding:5px 8px;border-bottom:1px solid #e6e9f0}
+p{margin:4px 0;font-size:13px}</style></head><body>
+<header><h1>Cursus Connect — vigie</h1><p>Mis à jour ${echapper(dateHeure(t.toISOString()))} · page rafraîchie chaque minute · historique public : status.cursusconnect.com</p></header>
+<main><div class="cartes">${etats.map(carte).join("") || "<p>Aucun relevé encore.</p>"}</div>
+<section class="bloc"><h2>Tâches et signaux du produit</h2>${signaux.length ? `<table><tr><th>Env.</th><th>Type</th><th>Nom</th><th>État</th><th>Dernier signal</th><th>Détail</th></tr>${signaux.map(ligneSignal).join("")}</table>` : "<p>Aucun signal reçu du produit pour l'instant.</p>"}</section>
+<section class="bloc"><h2>Échéances</h2>${echeances.length ? `<table><tr><th>Quoi</th><th>Date</th><th>Reste</th><th>Source</th></tr>${echeances.map(ligneEcheance).join("")}</table>` : "<p>Première vérification à 08:00 (Paris).</p>"}</section>
+<section class="bloc"><h2>Dernières transitions</h2>${transitions.length ? `<table><tr><th>Quand</th><th>Env.</th><th>De</th><th>Vers</th><th>Détail</th></tr>${transitions.map((x) => `<tr><td>${echapper(dateHeure(x.t))}</td><td>${echapper(x.env)}</td><td>${echapper(libelle(x.de))}</td><td style="color:${COULEUR[x.vers] || "#444"}">${echapper(libelle(x.vers))}</td><td>${echapper(x.detail)}</td></tr>`).join("")}</table>` : "<p>Aucune transition journalisée.</p>"}</section>
+</main></body></html>`;
 }
