@@ -37,6 +37,15 @@ button.bouton{border:0;cursor:pointer;font-family:inherit}
   word-break:break-all;background:rgba(26,110,158,.07);border-radius:6px;padding:7px 9px}
 .abonnement-actions{display:flex;flex-wrap:wrap;gap:8px}
 .abonnement-note{margin:10px 0 0!important;font-size:12.5px!important}
+/* Abonnement : formulaire (la vigie envoie la confirmation, puis les alertes). */
+.abonnement-label{display:block;font-size:12.5px;font-weight:600;margin:0 0 5px}
+#abonnement-email{box-sizing:border-box;width:100%;font:inherit;font-size:14px;padding:8px 10px;
+  border:1px solid var(--trait);border-radius:8px;margin:0 0 10px;background:#fff;color:#1b1f2a}
+#abonnement-email:focus{outline:2px solid #1a6e9e;outline-offset:1px}
+button.bouton:disabled{opacity:.6;cursor:wait}
+.abonnement-note--erreur{color:#b3261e!important}
+.abonnement-mentions{margin:12px 0 0!important;font-size:11.5px!important;line-height:1.45}
+.abonnement-secours{margin:10px 0 0!important;font-size:12px!important}
 
 /* ---- bannière ---- */
 .banniere{display:flex;align-items:center;gap:11px;border-radius:12px;padding:17px 20px;

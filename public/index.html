@@ -21,19 +21,22 @@
         <details class="abonnement">
           <summary>Être prévenu des incidents</summary>
           <div class="abonnement-corps">
-            <p>
-              L'abonnement automatique aux notifications est en préparation. En attendant,
-              écrivez-nous à l'adresse ci-dessous, avec le nom de votre centre et l'adresse
-              à prévenir : nous vous inscrirons à la liste d'alerte et vous préviendrons par
-              courriel dès qu'un incident affecte la production.
-            </p>
+            <form id="form-abonnement" novalidate>
+              <p>Recevez un courriel à chaque incident de Cursus Connect, et à son rétablissement.</p>
+              <label for="abonnement-email" class="abonnement-label">Votre adresse e-mail</label>
+              <input id="abonnement-email" name="email" type="email" autocomplete="email" required
+                     maxlength="254" placeholder="prenom.nom@etablissement.fr">
+              <button type="submit" class="bouton" id="abonnement-envoyer">M'abonner</button>
+              <p class="abonnement-note" id="abonnement-message" role="status" hidden></p>
+              <p class="abonnement-mentions">
+                Un courriel de confirmation vous sera envoyé : rien ne part sans votre accord.
+                Votre adresse ne sert qu'à ces alertes. Elle est conservée dans l'Union européenne
+                tant que vous restez abonné, et effacée dès votre désinscription, possible en un
+                clic depuis chaque courriel. Responsable : Life Support Distribution.
+              </p>
+            </form>
             <!--email_off-->
-            <p class="abonnement-adresse" id="adresse-alertes">support@lifesupportdistribution.fr</p>
-            <div class="abonnement-actions">
-              <button type="button" class="bouton" id="copier-adresse">Copier l'adresse</button>
-              <a class="bouton bouton--second" href="mailto:support@lifesupportdistribution.fr?subject=Alertes%20d%27incident%20Cursus%20Connect&amp;body=Bonjour%2C%0A%0AMerci%20de%20m%27inscrire%20aux%20alertes%20d%27incident%20de%20Cursus%20Connect.%0A%0ANom%20du%20centre%20%3A%20%0AAdresse%20%C3%A0%20pr%C3%A9venir%20%3A%20">Ouvrir ma messagerie</a>
-            </div>
-            <p class="abonnement-note" id="copie-faite" role="status" hidden></p>
+            <p class="abonnement-secours">Une question ? <span id="adresse-alertes">support@lifesupportdistribution.fr</span></p>
             <!--/email_off-->
           </div>
         </details>

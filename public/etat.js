@@ -229,24 +229,41 @@ async function charger() {
   peindreIncidents();
 }
 
-/* Abonnement : copier l'adresse. Le lien mailto: ne fait rien sur un poste sans
-   logiciel de messagerie ; la copie marche partout. Repli par sélection si le
-   presse-papiers est refusé (navigateur ancien, contexte non sécurisé). */
-const boutonCopier = document.getElementById("copier-adresse");
-if (boutonCopier) {
-  boutonCopier.addEventListener("click", async () => {
-    const zone = document.getElementById("adresse-alertes");
-    const note = document.getElementById("copie-faite");
-    let copie = false;
-    try { await navigator.clipboard.writeText(zone.textContent.trim()); copie = true; }
-    catch (e) {
-      const plage = document.createRange(); plage.selectNodeContents(zone);
-      const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(plage);
+/* Abonnement aux alertes d'incident. La page n'envoie que l'adresse ; la vigie
+   (Worker Cloudflare, cloudflare/vigie.js) envoie le courriel de confirmation, puis
+   un courriel à chaque incident de production et à son rétablissement. Double
+   consentement : rien ne part vers une adresse qui n'a pas confirmé. */
+const URL_ABONNEMENT = "https://cursus-connect-vigie.fabien-boch.workers.dev/abonnement";
+const formAbonnement = document.getElementById("form-abonnement");
+if (formAbonnement) {
+  formAbonnement.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const champ = document.getElementById("abonnement-email");
+    const bouton = document.getElementById("abonnement-envoyer");
+    const msg = document.getElementById("abonnement-message");
+    const dire = (texte, erreur) => {
+      msg.textContent = texte; msg.hidden = false;
+      msg.classList.toggle("abonnement-note--erreur", !!erreur);
+    };
+    const echec = "L'inscription n'a pas abouti pour le moment. Réessayez dans quelques minutes, "
+      + "ou écrivez-nous à support@lifesupportdistribution.fr.";
+    const email = champ.value.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) { dire("Cette adresse ne semble pas valide.", true); champ.focus(); return; }
+    bouton.disabled = true;
+    try {
+      const r = await fetch(URL_ABONNEMENT, { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email }) });
+      if (r.status === 202) {
+        dire("C'est presque fait : un courriel de confirmation vient de partir vers " + email
+          + ". Cliquez sur le lien qu'il contient pour activer l'abonnement.");
+        champ.value = "";
+      } else if (r.status === 400) dire("Cette adresse ne semble pas valide.", true);
+      else dire(echec, true);
+    } catch (e) {
+      dire(echec, true);
+    } finally {
+      bouton.disabled = false;
     }
-    note.textContent = copie
-      ? "Adresse copiée. Collez-la dans votre messagerie, avec le nom de votre centre et l'adresse à prévenir."
-      : "L'adresse est sélectionnée : copiez-la (Ctrl+C ou Cmd+C).";
-    note.hidden = false;
   });
 }
 
