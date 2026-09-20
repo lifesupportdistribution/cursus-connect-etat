@@ -2,7 +2,7 @@
 // D1 est simule par le SQLite integre a Node (D1 EST du SQLite) : les requetes
 // sont celles du Worker, executees pour de vrai. Heures SIMULEES uniquement.
 //   node cloudflare/vigie.banc.mjs
-import w, { sonder, recevoirSignal, tableau, verifierEcheances, abonnement } from "./vigie.js";
+import w, { sonder, recevoirSignal, tableau, verifierEcheances, abonnement, epreuver } from "./vigie.js";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 
@@ -24,13 +24,14 @@ const D1 = {
 const ligne = (sql, ...a) => db.prepare(sql).get(...a);
 
 // --- faux reseau ---
-let reponses = {}, appels = [], rdap = { date: null, ko: false }, tem = { ko: false };
+let reponses = {}, appels = [], rdap = { date: null, ko: false }, tem = { ko: false }, epreuve = { prod: null, test: null };
 globalThis.fetch = async (url, o = {}) => {
   appels.push({ url, o });
   if (url.startsWith("https://api.pushover.net")) { const p = Object.fromEntries(o.body); appels.at(-1).pushover = p; return globalThis.PUSHOVER_KO ? new Response('{"status":0,"errors":["bad"]}', { status: 400 }) : new Response('{"status":1}', { status: 200 }); }
   if (url.startsWith("https://api.github.com")) return new Response(null, { status: 204 });
   if (url.startsWith("https://raw.githubusercontent.com")) return new Response(JSON.stringify({ composants: { application: { jours: { "2026-09-18": { n: 40, ko: 1 } } } } }));
   if (url.startsWith("https://api.scaleway.com/transactional-email/")) { appels.at(-1).tem = JSON.parse(o.body); appels.at(-1).auth = o.headers["X-Auth-Token"]; return tem.ko ? new Response('{"message":"refus"}', { status: 403 }) : new Response('{"emails":[{"id":"x"}]}', { status: 200 }); }
+  if (url.endsWith("/api/epreuve")) { appels.at(-1).epreuve = { url, auth: o.headers.Authorization, corps: JSON.parse(o.body) }; const e = url.startsWith("https://prod") ? epreuve.prod : epreuve.test; if (e === "404") return new Response("", { status: 404 }); if (e === "reseau") throw new Error("ECONNRESET"); return new Response(JSON.stringify(e), { status: e.ok ? 200 : 503, headers: { "content-type": "application/json" } }); }
   if (url.startsWith("https://rdap.org/")) return rdap.ko ? new Response("", { status: 503 }) : new Response(JSON.stringify({ events: [{ eventAction: "registration", eventDate: "2025-01-01T00:00:00Z" }, { eventAction: "expiration", eventDate: rdap.date + "T12:00:00Z" }] }));
   const r = reponses[url];
   if (r === "timeout") { const e = new Error("x"); e.name = "AbortError"; throw e; }
@@ -41,7 +42,12 @@ const OK = { status: 200, corps: { version: "1.575.0", etat: "ok", base: "ok", s
 const KO = { status: 503, corps: { version: "1.575.0", etat: "hors service", base: "indisponible", stockage: "ok", courriel: "ok", cloisonnement: "actif", tls: "ca_fournie", schema: 14, schemaRequis: 14 } };
 const DEG = { status: 200, corps: { version: "1.575.0", etat: "degrade", base: "ok", stockage: "ok", cloisonnement: "actif", tls: "ca_fournie", courriel: "indisponible" } };
 const env = { SONDE_PRODUCTION_URL: "https://prod/api/sante", SONDE_TEST_URL: "https://test/api/sante", GITHUB_JETON: "g", PUSHOVER_JETON: "p", PUSHOVER_UTILISATEUR: "u", VIGIE_SIGNAL_JETON: "jeton-signal", VIGIE_TABLEAU_MDP: "mdp", ETAT: D1,
-  SCW_TEM_CLE: "cle-tem", SCW_PROJET: "projet-1", ABONNEMENT_EXPEDITEUR: "etat@cursusconnect.com", ABONNEMENT_ORIGINE: "https://status.cursusconnect.com", VIGIE_URL: "https://vigie.test" };
+  SCW_TEM_CLE: "cle-tem", SCW_PROJET: "projet-1", ABONNEMENT_EXPEDITEUR: "etat@cursusconnect.com", ABONNEMENT_ORIGINE: "https://status.cursusconnect.com", VIGIE_URL: "https://vigie.test",
+  EPREUVE_DESTINATAIRE: "temoin@lifesupportdistribution.fr" };
+const EP_OK = { ok: true, environnement: "production", version: "1.577.0", reussies: 9, total: 9, epreuves: [{ nom: "stockage", ok: true, ms: 300, detail: "ecrit, relu, efface" }, { nom: "courriel", ok: true, ms: 800, detail: "envoye" }] };
+const EP_KO = { ok: false, environnement: "production", version: "1.577.0", reussies: 7, total: 9, epreuves: [{ nom: "stockage", ok: false, ms: 300, detail: "PUT 403" }, { nom: "maintenance", ok: false, ms: 12, detail: "password authentication failed" }, { nom: "courriel", ok: true, ms: 800, detail: "envoye" }] };
+epreuve.prod = EP_OK; epreuve.test = { ...EP_OK, environnement: "test" };
+const eps = () => appels.filter((a) => a.epreuve).map((a) => a.epreuve);
 const tems = () => appels.filter((a) => a.tem).map((a) => a.tem);
 const tick = (iso, e = env) => w.scheduled({ scheduledTime: Date.parse(iso) }, e, {});
 const pushs = () => appels.filter((a) => a.pushover).map((a) => a.pushover);
@@ -218,7 +224,34 @@ const tb = await (await tableau(new Request("https://vigie/", { headers: { Autho
 assert.match(tb, /0 abonné\(s\) actif\(s\) · 1 en attente de confirmation/);
 ok("inscription non confirmee effacee apres 48 h ; le tableau compte les abonnes"); raz();
 
-// 29. la racine ne demande jamais de mot de passe (apercu de l'editeur Cloudflare, piege n.33)
+// 29. epreuve quotidienne a 05:50 UTC : les deux environnements, jeton, destinataire, resultat range
+raz(); await tick("2026-09-25T05:50:00Z"); let ep = eps(); assert.equal(ep.length, 2);
+assert.equal(ep[0].url, "https://prod/api/epreuve"); assert.equal(ep[0].auth, "Bearer jeton-signal"); assert.equal(ep[0].corps.destinataire, "temoin@lifesupportdistribution.fr");
+assert.equal(ligne("SELECT ok, reussies, motif FROM epreuves WHERE env = 'production'").ok, 1); assert.equal(pushs().length, 0);
+ok("epreuve quotidienne : production et test, jeton et destinataire, aucune alerte quand tout est operant"); raz();
+// 30. echec en production : alerte haute qui nomme les reglages en defaut ; pas de repetition le jour meme ; retablissement annonce
+epreuve.prod = EP_KO; await tick("2026-09-26T05:50:00Z"); let p2 = pushs(); assert.equal(p2.length, 1); assert.equal(p2[0].priority, "1");
+assert.match(p2[0].message, /EPREUVE D'ENVIRONNEMENT EN ECHEC/); assert.match(p2[0].message, /stockage \(PUT 403\)/); assert.match(p2[0].message, /maintenance/); assert.match(p2[0].message, /7\/9/); raz();
+await epreuver(env, "production", "https://prod/api/sante", new Date("2026-09-26T09:00:00Z"), "manuelle"); assert.equal(pushs().length, 0); raz();
+epreuve.prod = EP_OK; await tick("2026-09-27T05:50:00Z"); p2 = pushs(); assert.equal(p2.length, 1); assert.equal(p2[0].priority, "0"); assert.match(p2[0].message, /de nouveau reussie/);
+ok("epreuve en echec : alerte haute nommant les reglages, pas de repetition, retablissement annonce"); raz();
+// 31. nouvelle version en production -> epreuve dans la minute, avec le motif ; la premiere version vue ne declenche rien
+reponses["https://prod/api/sante"] = { ...OK, corps: { ...OK.corps, version: "1.578.0" } }; await tick("2026-09-27T10:03:00Z");
+ep = eps(); assert.equal(ep.length, 1); assert.equal(ligne("SELECT motif FROM epreuves WHERE env = 'production'").motif, "nouvelle version 1.578.0");
+raz(); await tick("2026-09-27T10:04:00Z"); assert.equal(eps().length, 0);
+ok("nouvelle version : epreuve immediate, une seule fois"); raz();
+// 32. produit anterieur (404) ou vigie sans destinataire : verdict explicite, pas de plantage
+epreuve.prod = "404"; await tick("2026-09-28T05:50:00Z"); p2 = pushs(); assert.ok(p2.some((x) => /route absente/.test(x.message)));
+epreuve.prod = EP_OK; raz(); await epreuver({ ...env, VIGIE_SIGNAL_JETON: "" }, "production", "https://prod/api/sante", new Date("2026-09-28T06:00:00Z"), "x"); assert.equal(eps().length, 0);
+ok("route absente : verdict explicite ; sans jeton : rien n'est appele"); raz();
+await tick("2026-09-29T05:50:00Z"); raz();
+// 33. le tableau et la preuve de vie rendent compte de l'epreuve
+const tb2 = await (await tableau(new Request("https://vigie/tableau", { headers: { Authorization: "Basic " + btoa("lsd:mdp") } }), env, new Date("2026-09-29T07:01:00Z"))).text();
+assert.match(tb2, /Épreuve d'environnement/); assert.match(tb2, /9\/9/);
+await tick("2026-09-29T06:00:00Z"); const pv = pushs().find((x) => x.priority === "-2"); assert.match(pv.message, /Epreuve production : ok 9\/9/);
+ok("tableau et preuve de vie : l'epreuve y figure"); raz();
+
+// 34. la racine ne demande jamais de mot de passe (apercu de l'editeur Cloudflare, piege n.33)
 let rr = await w.fetch(new Request("https://vigie/"), env);
 assert.equal(rr.status, 404); assert.equal(rr.headers.get("WWW-Authenticate"), null);
 rr = await w.fetch(new Request("https://vigie/tableau"), env); assert.equal(rr.status, 401);
@@ -226,7 +259,7 @@ rr = await w.fetch(new Request("https://vigie/tableau", { headers: { Authorizati
 assert.equal(rr.status, 200);
 ok("tableau sous /tableau ; la racine repond 404 sans demander de mot de passe");
 
-// 30. erreur GitHub n'empeche pas la sonde
+// 35. erreur GitHub n'empeche pas la sonde
 globalThis.fetch = (f => async (u, o) => u.startsWith("https://api.github.com") ? new Response("nope", { status: 401 }) : f(u, o))(globalThis.fetch);
-await assert.rejects(tick("2026-09-24T12:22:00Z"), /dispatch refuse : HTTP 401/); ok("GitHub en echec : invocation en echec, sonde quand meme faite");
+await assert.rejects(tick("2026-09-30T12:22:00Z"), /dispatch refuse : HTTP 401/); ok("GitHub en echec : invocation en echec, sonde quand meme faite");
 console.log(`banc : ${n} scenarios passes`);

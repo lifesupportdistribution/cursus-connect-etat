@@ -24,8 +24,17 @@ peut donc vivre dans ce dépôt public.
    produit ont donné signe de vie : `purges` depuis moins de 26 h, `sauvegardes`
    depuis moins de 20 h. Une tâche n'est surveillée qu'après son premier signe
    de vie.
-6. À 06:00 UTC : les **échéances** (préavis 30 jours, rappel hebdomadaire puis
-   quotidien à 7 jours), une **preuve de vie** muette, et le ménage.
+6. À 05:50 UTC, joue l'**épreuve d'environnement** du produit (`POST /api/epreuve`,
+   lot 1.577.0) sur la production puis sur le test. Le produit y **exerce** chaque
+   réglage : il écrit, relit et efface un objet témoin dans le stockage, envoie un
+   courriel témoin à `EPREUVE_DESTINATAIRE`, ouvre une connexion avec l'URL de
+   maintenance, vérifie l'environnement déclaré, l'expéditeur et la console. Elle
+   est **rejouée dès qu'une nouvelle version apparaît** sur un environnement.
+   C'est la garantie « ce qui est testé en test fonctionne en production » : même
+   code des deux côtés, réglages prouvés des deux côtés.
+7. À 06:00 UTC : les **échéances** (préavis 30 jours, rappel hebdomadaire puis
+   quotidien à 7 jours), une **preuve de vie** muette (qui rend compte de
+   l'épreuve), et le ménage.
 
 **Sur demande**
 
@@ -50,7 +59,7 @@ peut donc vivre dans ce dépôt public.
 | Événement | Pushover (production) |
 |---|---|
 | hors service, injoignable | **urgence** : sonne chaque minute jusqu'à accusé de réception, 1 h |
-| dégradé, tâche en échec ou muette, anomalie, échéance à moins de 30 jours | haute : sonne, même en heures calmes |
+| dégradé, tâche en échec ou muette, anomalie, échéance à moins de 30 jours, **épreuve d'environnement en échec** | haute : sonne, même en heures calmes |
 | retour à la normale | normale |
 
 **Les abonnés** reçoivent, pour la production seulement : « incident en cours »
@@ -74,7 +83,8 @@ Le test : priorité normale pour tout, sans rappel.
 | `GITHUB_JETON` | secret | jeton à granularité fine, **ce dépôt seul**, Actions en lecture/écriture |
 | `PUSHOVER_JETON` | secret | jeton de l'application Pushover |
 | `PUSHOVER_UTILISATEUR` | secret | clé d'utilisateur Pushover du destinataire |
-| `VIGIE_SIGNAL_JETON` | secret | partagé avec Vercel (test et production) — absent = `/signal` fermé |
+| `VIGIE_SIGNAL_JETON` | secret | partagé avec Vercel (test et production) — absent = `/signal` fermé et épreuve non jouée |
+| `EPREUVE_DESTINATAIRE` | texte | adresse LSD qui reçoit le courriel témoin de l'épreuve (deux par jour : test et production) |
 | `VIGIE_TABLEAU_MDP` | secret | mot de passe du tableau de bord — absent = tableau fermé |
 | `SCW_TEM_CLE` | secret | clé d'API Scaleway (envoi Transactional Email) — absent = abonnement fermé (503) |
 | `SCW_PROJET` | texte | identifiant du projet Scaleway qui porte le domaine d'envoi |
@@ -122,7 +132,7 @@ Responsable : Life Support Distribution. À inscrire au registre des traitements
 
 ## Éprouver sans casser la production
 
-- **Le banc** : `node cloudflare/vigie.banc.mjs` rejoue 33 scénarios sans réseau
+- **Le banc** : `node cloudflare/vigie.banc.mjs` rejoue 38 scénarios sans réseau
   ni Cloudflare. D1 y est simulée par le SQLite intégré à Node (Node 22.13 ou
   plus) : les requêtes du Worker sont exécutées pour de vrai. Heures simulées
   seulement : le banc passe quelle que soit l'heure réelle.
@@ -140,6 +150,11 @@ Responsable : Life Support Distribution. À inscrire au registre des traitements
 - **L'abonnement** : s'inscrire depuis la page d'état avec sa propre adresse,
   confirmer par le bouton du courriel, puis vérifier le compteur du tableau de
   bord. Se désinscrire par le lien d'un courriel d'état.
+
+- **L'épreuve d'environnement** : `curl -X POST <adresse de l'environnement>/api/epreuve
+  -H "Authorization: Bearer <jeton>" -H "Content-Type: application/json" -d '{}'`
+  → un verdict par réglage (sans courriel témoin si `destinataire` est absent).
+  Le tableau de bord montre la dernière épreuve de chaque environnement.
 
 ## Ce qu'elle ne fait pas
 

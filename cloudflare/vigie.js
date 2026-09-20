@@ -10,7 +10,12 @@
 //      (workflow_dispatch), qui tient l'historique et la page d'etat publique ;
 //   4. a la minute 30 de chaque heure, verifie que les taches planifiees du
 //      produit ont donne signe de vie (purges, sauvegardes) ;
-//   5. a 06:00 UTC, verifie les echeances (cles, jetons, domaine) et envoie une
+//   5. a 05:50 UTC, joue l'EPREUVE D'ENVIRONNEMENT du produit (POST /api/epreuve,
+//      lot 1.577.0) sur la production puis sur le test : chaque reglage est EXERCE
+//      (stockage ecrit/relu/efface, courriel temoin envoye, URL de maintenance, console).
+//      Elle est rejouee des qu'une NOUVELLE VERSION apparait sur un environnement :
+//      c'est la garantie « ce qui est teste en test fonctionne en production ».
+//   6. a 06:00 UTC, verifie les echeances (cles, jetons, domaine) et envoie une
 //      preuve de vie muette.
 //
 // Et sur demande (fetch) :
@@ -29,6 +34,8 @@
 //   PUSHOVER_JETON        secret   jeton de l'application Pushover
 //   PUSHOVER_UTILISATEUR  secret   cle d'utilisateur Pushover
 //   VIGIE_SIGNAL_JETON    secret   partage avec le produit (Vercel) ; absent = /signal ferme
+//                                  et epreuve d'environnement non jouee
+//   EPREUVE_DESTINATAIRE  texte    adresse LSD qui recoit le courriel temoin de l'epreuve
 //   VIGIE_TABLEAU_MDP     secret   mot de passe du tableau de bord ; absent = tableau ferme
 //   SCW_TEM_CLE           secret   cle d'API Scaleway (envoi Transactional Email) ; absent = abonnement ferme
 //   SCW_PROJET            texte    identifiant du projet Scaleway qui porte le domaine d'envoi
@@ -51,6 +58,8 @@ const BRANCHE = "main";
 const MINUTES_DECLENCHEMENT = [7, 22, 37, 52];
 const MINUTE_TACHES = 30;
 const MINUTE_PREUVE_DE_VIE = { h: 6, m: 0 }; // UTC
+const MINUTE_EPREUVE = { h: 5, m: 50 };     // UTC, avant la preuve de vie qui en rend compte
+const DELAI_EPREUVE_MS = 60000;
 const CONFIRMATIONS = 2;        // releves identiques d'affilee avant de changer d'etat
 const RAPPEL_MS = 60 * 60 * 1000;
 const DELAI_SONDE_MS = 10000;
@@ -103,6 +112,10 @@ export default {
     if (MINUTES_DECLENCHEMENT.includes(minute)) await tache("declenchement GitHub", () => declencherReleve(env));
     if (minute === MINUTE_TACHES) await tache("taches planifiees", () => verifierTaches(env, t));
     await tache("envois", () => traiterEnvois(env, t));
+    if (heure === MINUTE_EPREUVE.h && minute === MINUTE_EPREUVE.m) {
+      await tache("epreuve production", () => epreuver(env, "production", env.SONDE_PRODUCTION_URL, t, "quotidienne"));
+      if (env.SONDE_TEST_URL) await tache("epreuve test", () => epreuver(env, "test", env.SONDE_TEST_URL, t, "quotidienne"));
+    }
     if (heure === MINUTE_PREUVE_DE_VIE.h && minute === MINUTE_PREUVE_DE_VIE.m) {
       await tache("echeances", () => verifierEcheances(env, t));
       await tache("preuve de vie", () => preuveDeVie(env, t));
@@ -147,6 +160,9 @@ async function preparer(env) {
       email TEXT, jeton TEXT, sujet TEXT, texte TEXT, html TEXT, apres TEXT, essais INTEGER DEFAULT 0,
       statut TEXT DEFAULT 'a_envoyer', erreur TEXT)`),
     env.ETAT.prepare(`CREATE TABLE IF NOT EXISTS compteurs (cle TEXT PRIMARY KEY, n INTEGER, valeur TEXT)`),
+    env.ETAT.prepare(`CREATE TABLE IF NOT EXISTS epreuves (env TEXT PRIMARY KEY, t TEXT, ok INTEGER, reussies INTEGER,
+      total INTEGER, version TEXT, motif TEXT, detail TEXT, derniere_alerte TEXT)`),
+    env.ETAT.prepare(`CREATE TABLE IF NOT EXISTS versions (env TEXT PRIMARY KEY, version TEXT, t TEXT)`),
   ]);
   _prepare = true;
 }
@@ -189,6 +205,7 @@ function cause(c) {
 async function surveiller(env, nom, url, t) {
   const releve = await sonder(url);
   await mesurer(env, nom, t, releve);
+  await suivreVersion(env, nom, url, t, releve);
   const etat = await lireEtat(env, nom);
   const maintenant = t.toISOString();
 
@@ -252,6 +269,69 @@ async function ecrireEtat(env, nom, e) {
     en_attente = excluded.en_attente, compte = excluded.compte, derniere_alerte = excluded.derniere_alerte,
     detail = excluded.detail, maj = excluded.maj`)
     .bind(nom, e.verdict, e.depuis, e.en_attente, e.compte, e.derniere_alerte, e.detail || "", e.maj).run();
+}
+
+/* --- nouvelle version : l'epreuve d'environnement tout de suite ------------------ */
+// La premiere version vue n'est que memorisee. Ensuite, tout changement de version
+// declenche l'epreuve dans la minute : une promotion dont un reglage ne repond pas
+// se voit avant qu'un client ne s'en apercoive.
+async function suivreVersion(env, nom, url, t, releve) {
+  if (!releve.version) return;
+  const v = await env.ETAT.prepare("SELECT version FROM versions WHERE env = ?").bind(nom).first();
+  if (v && v.version === releve.version) return;
+  await env.ETAT.prepare(`INSERT INTO versions (env, version, t) VALUES (?, ?, ?)
+    ON CONFLICT(env) DO UPDATE SET version = excluded.version, t = excluded.t`).bind(nom, releve.version, t.toISOString()).run();
+  if (!v) return;
+  console.log(`${nom} : nouvelle version ${releve.version} (avant ${v.version}) -> epreuve`);
+  await epreuver(env, nom, url, t, `nouvelle version ${releve.version}`);
+}
+
+/* --- l'epreuve d'environnement ------------------------------------------------------ */
+// POST /api/epreuve du produit (lot 1.577.0), avec le jeton partage. Le produit exerce
+// ses reglages et repond un verdict par reglage, sans hote ni identifiant. Alerte a
+// chaque echec (haute en production, normale sur le test), une fois par jour au plus
+// pour un meme echec ; retablissement annonce.
+export async function epreuver(env, nom, urlSante, t, motif) {
+  if (!env.VIGIE_SIGNAL_JETON || !urlSante) return null;
+  const url = urlSante.replace(/\/api\/sante\/?$/, "/api/epreuve");
+  const ctrl = new AbortController(); const minuteur = setTimeout(() => ctrl.abort(), DELAI_EPREUVE_MS);
+  let r, corps;
+  try {
+    r = await fetch(url, { method: "POST", signal: ctrl.signal,
+      headers: { "Authorization": `Bearer ${env.VIGIE_SIGNAL_JETON}`, "Content-Type": "application/json", "User-Agent": "cursus-connect-vigie" },
+      body: JSON.stringify({ destinataire: env.EPREUVE_DESTINATAIRE || "" }) });
+    corps = await r.json();
+  } catch (e) {
+    clearTimeout(minuteur);
+    corps = { ok: false, reussies: 0, total: 0, version: null, epreuves: [{ nom: "epreuve", ok: false, detail: r ? `reponse illisible (HTTP ${r.status})` : (e.name === "AbortError" ? "aucune reponse en 60 s" : "erreur reseau") }] };
+  }
+  clearTimeout(minuteur);
+  if (r && r.status === 404) corps = { ok: false, reussies: 0, total: 0, version: null, epreuves: [{ nom: "epreuve", ok: false, detail: "route absente : produit anterieur a 1.577.0 ou jeton non pose dans Vercel" }] };
+  const echecs = (corps.epreuves || []).filter((x) => !x.ok);
+  const avant = await env.ETAT.prepare("SELECT * FROM epreuves WHERE env = ?").bind(nom).first();
+  const maintenant = t.toISOString();
+  let derniere = avant ? avant.derniere_alerte : null;
+  const priorite = nom === "production" ? 1 : 0;
+  if (!corps.ok) {
+    const memeEchec = avant && !avant.ok && derniere && t.getTime() - Date.parse(derniere) < 86400000
+      && JSON.stringify(echecs.map((x) => x.nom)) === JSON.stringify(JSON.parse(avant.detail || "[]").filter((x) => !x.ok).map((x) => x.nom));
+    if (!memeEchec) {
+      await pushover(env, `Cursus Connect - ${nom}`,
+        `EPREUVE D'ENVIRONNEMENT EN ECHEC (${motif}) : ${corps.reussies || 0}/${corps.total || "?"} reglages operants. En defaut : `
+        + echecs.map((x) => `${x.nom} (${x.detail || "?"})`).join(" ; ").slice(0, 600), priorite);
+      derniere = maintenant;
+    }
+  } else if (avant && !avant.ok) {
+    await pushover(env, `Cursus Connect - ${nom}`, `Epreuve d'environnement de nouveau reussie (${motif}) : ${corps.reussies}/${corps.total} reglages operants, version ${corps.version || "?"}.`, 0);
+    derniere = null;
+  }
+  await env.ETAT.prepare(`INSERT INTO epreuves (env, t, ok, reussies, total, version, motif, detail, derniere_alerte)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(env) DO UPDATE SET t = excluded.t, ok = excluded.ok, reussies = excluded.reussies,
+    total = excluded.total, version = excluded.version, motif = excluded.motif, detail = excluded.detail, derniere_alerte = excluded.derniere_alerte`)
+    .bind(nom, maintenant, corps.ok ? 1 : 0, corps.reussies || 0, corps.total || 0, corps.version || null, motif,
+          JSON.stringify((corps.epreuves || []).map((x) => ({ nom: x.nom, ok: !!x.ok, ms: x.ms || 0, detail: String(x.detail || "").slice(0, 120) }))), derniere).run();
+  console.log(`epreuve ${nom} (${motif}) : ${corps.ok ? "ok" : "ECHEC"} ${corps.reussies || 0}/${corps.total || 0}`);
+  return corps;
 }
 
 /* --- Pushover ---------------------------------------------------------------- */
@@ -396,6 +476,8 @@ async function preuveDeVie(env, t) {
   const prod = await lireEtat(env, "production");
   const lignes = [`Production : ${libelle(prod.verdict)} depuis ${duree(prod.depuis, t.toISOString())}.`];
   if (env.SONDE_TEST_URL) { const test = await lireEtat(env, "test"); lignes.push(`Test : ${libelle(test.verdict)} depuis ${duree(test.depuis, t.toISOString())}.`); }
+  const { results: ep } = await env.ETAT.prepare("SELECT env, ok, reussies, total FROM epreuves ORDER BY env").all();
+  for (const x of ep || []) lignes.push(`Epreuve ${x.env} : ${x.ok ? "ok" : "ECHEC"} ${x.reussies}/${x.total}.`);
   try {
     const h = await (await fetch(HISTORIQUE_URL, { headers: { "Cache-Control": "no-store" } })).json();
     const hier = new Date(t.getTime() - 86400000).toISOString().slice(0, 10);
@@ -438,11 +520,12 @@ export async function tableau(requete, env, t) {
   const transitions = await q("SELECT * FROM transitions ORDER BY id DESC LIMIT 20");
   const signaux = await q("SELECT * FROM signaux ORDER BY env, type, nom");
   const echeances = await q("SELECT * FROM echeances ORDER BY date");
+  const epreuves = await q("SELECT * FROM epreuves ORDER BY env");
   const abonnes = (await q("SELECT etat, COUNT(*) AS n FROM abonnes GROUP BY etat"))
     .reduce((a, x) => ({ ...a, [x.etat]: x.n }), {});
   const file = (await q("SELECT statut, COUNT(*) AS n FROM envois GROUP BY statut"))
     .reduce((a, x) => ({ ...a, [x.statut]: x.n }), {});
-  return new Response(pageTableau({ t, etats, mesures, transitions, signaux, echeances, abonnes, file }), {
+  return new Response(pageTableau({ t, etats, mesures, transitions, signaux, echeances, abonnes, file, epreuves }), {
     headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
                "X-Robots-Tag": "noindex", "Referrer-Policy": "no-referrer" } });
 }
@@ -452,8 +535,8 @@ const COULEUR = { ok: "#1d7a46", degrade: "#b7791f", hors_service: "#b3261e", in
 const dateHeure = (iso) => iso ? new Intl.DateTimeFormat("fr-FR", { timeZone: FUSEAU, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(iso)) : "-";
 
 /** @param {{ t: Date, etats: any[], mesures: any[], transitions: any[], signaux: any[], echeances: any[],
- *   abonnes?: Record<string, number>, file?: Record<string, number> }} p */
-export function pageTableau({ t, etats, mesures, transitions, signaux, echeances, abonnes = {}, file = {} }) {
+ *   abonnes?: Record<string, number>, file?: Record<string, number>, epreuves?: any[] }} p */
+export function pageTableau({ t, etats, mesures, transitions, signaux, echeances, abonnes = {}, file = {}, epreuves = [] }) {
   const carte = (e) => {
     const m = mesures.filter((x) => x.env === e.env);
     const n = m.reduce((a, x) => a + x.n, 0), ko = m.reduce((a, x) => a + x.ko, 0);
@@ -490,6 +573,7 @@ table{border-collapse:collapse;width:100%;font-size:13px}td,th{text-align:left;p
 p{margin:4px 0;font-size:13px}</style></head><body>
 <header><h1>Cursus Connect — vigie</h1><p>Mis à jour ${echapper(dateHeure(t.toISOString()))} · page rafraîchie chaque minute · historique public : status.cursusconnect.com</p></header>
 <main><div class="cartes">${etats.map(carte).join("") || "<p>Aucun relevé encore.</p>"}</div>
+<section class="bloc"><h2>Épreuve d'environnement — « ce qui est testé en test fonctionne en production »</h2>${epreuves.length ? `<table><tr><th>Env.</th><th>Verdict</th><th>Réglages</th><th>Version</th><th>Quand</th><th>Motif</th><th>En défaut</th></tr>${epreuves.map((e) => { let d = []; try { d = JSON.parse(e.detail || "[]"); } catch { d = []; } const ko = d.filter((x) => !x.ok); return `<tr><td>${echapper(e.env)}</td><td style="color:${e.ok ? "#1d7a46" : "#b3261e"};font-weight:600">${e.ok ? "opérant" : "EN ÉCHEC"}</td><td>${e.reussies}/${e.total}</td><td>${echapper(e.version || "-")}</td><td>${echapper(dateHeure(e.t))}</td><td>${echapper(e.motif)}</td><td>${ko.length ? ko.map((x) => `${echapper(x.nom)} — ${echapper(x.detail)}`).join("<br>") : "—"}</td></tr>`; }).join("")}</table>` : "<p>Aucune épreuve encore : première à 07:50 (Paris), ou dès la prochaine version.</p>"}</section>
 <section class="bloc"><h2>Tâches et signaux du produit</h2>${signaux.length ? `<table><tr><th>Env.</th><th>Type</th><th>Nom</th><th>État</th><th>Dernier signal</th><th>Détail</th></tr>${signaux.map(ligneSignal).join("")}</table>` : "<p>Aucun signal reçu du produit pour l'instant.</p>"}</section>
 <section class="bloc"><h2>Abonnés aux alertes d'incident</h2><p>${abonnes.actif || 0} abonné(s) actif(s) · ${abonnes.en_attente || 0} en attente de confirmation · file d'envoi : ${file.a_envoyer || 0} à envoyer${file.abandon ? `, <b style="color:#b3261e">${file.abandon} abandonné(s)</b>` : ""}</p></section>
 <section class="bloc"><h2>Échéances</h2>${echeances.length ? `<table><tr><th>Quoi</th><th>Date</th><th>Reste</th><th>Source</th></tr>${echeances.map(ligneEcheance).join("")}</table>` : "<p>Première vérification à 08:00 (Paris).</p>"}</section>
