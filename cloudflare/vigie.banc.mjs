@@ -218,7 +218,15 @@ const tb = await (await tableau(new Request("https://vigie/", { headers: { Autho
 assert.match(tb, /0 abonné\(s\) actif\(s\) · 1 en attente de confirmation/);
 ok("inscription non confirmee effacee apres 48 h ; le tableau compte les abonnes"); raz();
 
-// 29. erreur GitHub n'empeche pas la sonde
+// 29. la racine ne demande jamais de mot de passe (apercu de l'editeur Cloudflare, piege n.33)
+let rr = await w.fetch(new Request("https://vigie/"), env);
+assert.equal(rr.status, 404); assert.equal(rr.headers.get("WWW-Authenticate"), null);
+rr = await w.fetch(new Request("https://vigie/tableau"), env); assert.equal(rr.status, 401);
+rr = await w.fetch(new Request("https://vigie/tableau", { headers: { Authorization: "Basic " + btoa("lsd:mdp") } }), env);
+assert.equal(rr.status, 200);
+ok("tableau sous /tableau ; la racine repond 404 sans demander de mot de passe");
+
+// 30. erreur GitHub n'empeche pas la sonde
 globalThis.fetch = (f => async (u, o) => u.startsWith("https://api.github.com") ? new Response("nope", { status: 401 }) : f(u, o))(globalThis.fetch);
 await assert.rejects(tick("2026-09-24T12:22:00Z"), /dispatch refuse : HTTP 401/); ok("GitHub en echec : invocation en echec, sonde quand meme faite");
 console.log(`banc : ${n} scenarios passes`);

@@ -15,7 +15,9 @@
 //
 // Et sur demande (fetch) :
 //   POST /signal   le produit se signale lui-meme (taches, anomalies) ; jeton Bearer
-//   GET  /         le tableau de bord de l'exploitant ; authentification Basic
+//   GET  /tableau  le tableau de bord de l'exploitant ; authentification Basic. Pas a la
+//                  racine : l'apercu de l'editeur Cloudflare ouvre la racine, et la fenetre
+//                  de connexion bloquait tout l'onglet (piege n.33). La racine repond 404.
 //   POST /abonnement                 inscription aux alertes d'incident (double consentement)
 //   GET|POST /abonnement/confirmer   confirmation (bouton : un antivirus qui suit le lien ne confirme rien)
 //   GET|POST /abonnement/desinscrire desinscription en un clic (RFC 8058) ; l'adresse est effacee
@@ -115,7 +117,7 @@ export default {
     try {
       if (url.pathname === "/signal" && requete.method === "POST") return await recevoirSignal(requete, env, new Date());
       if (url.pathname.startsWith("/abonnement")) return await abonnement(requete, env, new Date());
-      if (url.pathname === "/" && requete.method === "GET") return await tableau(requete, env, new Date());
+      if (url.pathname === "/tableau" && requete.method === "GET") return await tableau(requete, env, new Date());
     } catch (e) {
       console.error(`fetch ${url.pathname} : ${e.message}`);
       return new Response("", { status: 500 });
@@ -449,6 +451,8 @@ const echapper = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp
 const COULEUR = { ok: "#1d7a46", degrade: "#b7791f", hors_service: "#b3261e", injoignable: "#b3261e" };
 const dateHeure = (iso) => iso ? new Intl.DateTimeFormat("fr-FR", { timeZone: FUSEAU, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(iso)) : "-";
 
+/** @param {{ t: Date, etats: any[], mesures: any[], transitions: any[], signaux: any[], echeances: any[],
+ *   abonnes?: Record<string, number>, file?: Record<string, number> }} p */
 export function pageTableau({ t, etats, mesures, transitions, signaux, echeances, abonnes = {}, file = {} }) {
   const carte = (e) => {
     const m = mesures.filter((x) => x.env === e.env);

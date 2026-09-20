@@ -43,7 +43,7 @@ peut donc vivre dans ce dépôt public.
 - `GET|POST /abonnement/desinscrire?j=…` : même principe ; accepte aussi le
   POST « en un clic » des messageries (RFC 8058, en-têtes `List-Unsubscribe`).
   L'adresse est **effacée**.
-- `GET /` : le **tableau de bord** de l'exploitant, en authentification Basic
+- `GET /tableau` : le **tableau de bord** de l'exploitant, en authentification Basic
   (utilisateur `lsd`). Il vit ici et non dans le produit : le jour où le produit
   tombe, c'est là qu'on regarde.
 
@@ -106,7 +106,7 @@ Responsable : Life Support Distribution. À inscrire au registre des traitements
 2. Vérifier dans *Déploiements* que le « Déploiement actif » porte la nouvelle
    version.
 
-## Quatre pièges du tableau de bord (constatés le 19.09.2026)
+## Cinq pièges du tableau de bord (constatés les 19 et 20.09.2026)
 
 - **Modifier une variable crée une version sans la déployer**, même via le
   bouton « Déployer ». Contrôler *Déploiements* ; au besoin *Promouvoir la
@@ -116,10 +116,13 @@ Responsable : Life Support Distribution. À inscrire au registre des traitements
 - **Supprimer un déclencheur agit avec une dizaine de minutes de retard.**
 - **« Secret » est une case à cocher** à droite du champ Valeur, non cochée par
   défaut. Une valeur enregistrée sans elle est lisible en clair.
+- **L'éditeur de code ouvre un aperçu de la racine du Worker.** Si la racine
+  demande un mot de passe, la fenêtre de connexion bloque tout l'onglet. C'est
+  pourquoi le tableau de bord est sous `/tableau` et la racine répond 404.
 
 ## Éprouver sans casser la production
 
-- **Le banc** : `node cloudflare/vigie.banc.mjs` rejoue 32 scénarios sans réseau
+- **Le banc** : `node cloudflare/vigie.banc.mjs` rejoue 33 scénarios sans réseau
   ni Cloudflare. D1 y est simulée par le SQLite intégré à Node (Node 22.13 ou
   plus) : les requêtes du Worker sont exécutées pour de vrai. Heures simulées
   seulement : le banc passe quelle que soit l'heure réelle.
