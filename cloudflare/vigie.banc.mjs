@@ -2,7 +2,7 @@
 // D1 est simule par le SQLite integre a Node (D1 EST du SQLite) : les requetes
 // sont celles du Worker, executees pour de vrai. Heures SIMULEES uniquement.
 //   node cloudflare/vigie.banc.mjs
-import w, { sonder, recevoirSignal, tableau, verifierEcheances } from "./vigie.js";
+import w, { sonder, recevoirSignal, tableau, verifierEcheances, abonnement } from "./vigie.js";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 
@@ -24,12 +24,13 @@ const D1 = {
 const ligne = (sql, ...a) => db.prepare(sql).get(...a);
 
 // --- faux reseau ---
-let reponses = {}, appels = [], rdap = { date: null, ko: false };
+let reponses = {}, appels = [], rdap = { date: null, ko: false }, tem = { ko: false };
 globalThis.fetch = async (url, o = {}) => {
   appels.push({ url, o });
   if (url.startsWith("https://api.pushover.net")) { const p = Object.fromEntries(o.body); appels.at(-1).pushover = p; return globalThis.PUSHOVER_KO ? new Response('{"status":0,"errors":["bad"]}', { status: 400 }) : new Response('{"status":1}', { status: 200 }); }
   if (url.startsWith("https://api.github.com")) return new Response(null, { status: 204 });
   if (url.startsWith("https://raw.githubusercontent.com")) return new Response(JSON.stringify({ composants: { application: { jours: { "2026-09-18": { n: 40, ko: 1 } } } } }));
+  if (url.startsWith("https://api.scaleway.com/transactional-email/")) { appels.at(-1).tem = JSON.parse(o.body); appels.at(-1).auth = o.headers["X-Auth-Token"]; return tem.ko ? new Response('{"message":"refus"}', { status: 403 }) : new Response('{"emails":[{"id":"x"}]}', { status: 200 }); }
   if (url.startsWith("https://rdap.org/")) return rdap.ko ? new Response("", { status: 503 }) : new Response(JSON.stringify({ events: [{ eventAction: "registration", eventDate: "2025-01-01T00:00:00Z" }, { eventAction: "expiration", eventDate: rdap.date + "T12:00:00Z" }] }));
   const r = reponses[url];
   if (r === "timeout") { const e = new Error("x"); e.name = "AbortError"; throw e; }
@@ -39,7 +40,9 @@ globalThis.fetch = async (url, o = {}) => {
 const OK = { status: 200, corps: { version: "1.575.0", etat: "ok", base: "ok", stockage: "ok", courriel: "ok", cloisonnement: "actif", tls: "ca_fournie", schema: 14, schemaRequis: 14 } };
 const KO = { status: 503, corps: { version: "1.575.0", etat: "hors service", base: "indisponible", stockage: "ok", courriel: "ok", cloisonnement: "actif", tls: "ca_fournie", schema: 14, schemaRequis: 14 } };
 const DEG = { status: 200, corps: { version: "1.575.0", etat: "degrade", base: "ok", stockage: "ok", cloisonnement: "actif", tls: "ca_fournie", courriel: "indisponible" } };
-const env = { SONDE_PRODUCTION_URL: "https://prod/api/sante", SONDE_TEST_URL: "https://test/api/sante", GITHUB_JETON: "g", PUSHOVER_JETON: "p", PUSHOVER_UTILISATEUR: "u", VIGIE_SIGNAL_JETON: "jeton-signal", VIGIE_TABLEAU_MDP: "mdp", ETAT: D1 };
+const env = { SONDE_PRODUCTION_URL: "https://prod/api/sante", SONDE_TEST_URL: "https://test/api/sante", GITHUB_JETON: "g", PUSHOVER_JETON: "p", PUSHOVER_UTILISATEUR: "u", VIGIE_SIGNAL_JETON: "jeton-signal", VIGIE_TABLEAU_MDP: "mdp", ETAT: D1,
+  SCW_TEM_CLE: "cle-tem", SCW_PROJET: "projet-1", ABONNEMENT_EXPEDITEUR: "etat@cursusconnect.com", ABONNEMENT_ORIGINE: "https://status.cursusconnect.com", VIGIE_URL: "https://vigie.test" };
+const tems = () => appels.filter((a) => a.tem).map((a) => a.tem);
 const tick = (iso, e = env) => w.scheduled({ scheduledTime: Date.parse(iso) }, e, {});
 const pushs = () => appels.filter((a) => a.pushover).map((a) => a.pushover);
 const github = () => appels.filter((a) => a.url.includes("api.github.com")).length;
@@ -143,7 +146,79 @@ assert.equal((await w.fetch(new Request("https://vigie/autre"), env)).status, 40
 db.prepare("INSERT INTO mesures (env, heure, n, ko, ms_total, ms_max) VALUES ('production', '2026-09-01T00:00Z', 1, 0, 100, 100)").run();
 await tick("2026-09-21T06:00:00Z"); p = pushs().filter((x) => x.priority === "-2"); assert.equal(p.length, 1); assert.match(p[0].message, /Production : en service/);
 assert.equal(ligne("SELECT COUNT(*) AS c FROM mesures WHERE heure < '2026-09-10'").c, 0); ok("preuve de vie muette, menage des mesures"); raz();
-// 21. erreur GitHub n'empeche pas la sonde
+// 21. abonnement : CORS, fermeture sans cle, forme d'adresse, double consentement
+const reqAb = (chemin, methode = "GET", corps) => new Request("https://vigie.test" + chemin, { method: methode,
+  headers: { "Content-Type": "application/json", Origin: "https://status.cursusconnect.com" }, body: corps === undefined ? undefined : JSON.stringify(corps) });
+const ab = (chemin, methode, corps, iso, e = env) => abonnement(reqAb(chemin, methode, corps), e, new Date(iso));
+let rep = await ab("/abonnement", "OPTIONS", undefined, "2026-09-21T07:01:00Z");
+assert.equal(rep.status, 204); assert.equal(rep.headers.get("Access-Control-Allow-Origin"), "https://status.cursusconnect.com");
+assert.equal((await ab("/abonnement", "POST", { email: "a@b.fr" }, "2026-09-21T07:01:00Z", { ...env, SCW_TEM_CLE: "" })).status, 503);
+assert.equal((await ab("/abonnement", "POST", { email: "pas une adresse" }, "2026-09-21T07:01:00Z")).status, 400);
+raz(); rep = await ab("/abonnement", "POST", { email: "Directrice@CHU-Exemple.fr" }, "2026-09-21T07:01:00Z");
+assert.equal(rep.status, 202); let mm = tems(); assert.equal(mm.length, 1);
+assert.equal(mm[0].to[0].email, "directrice@chu-exemple.fr"); assert.equal(mm[0].project_id, "projet-1"); assert.match(mm[0].subject, /confirmez/);
+const jeton = /confirmer\?j=([0-9a-f]{48})/.exec(mm[0].text)[1];
+assert.equal(ligne("SELECT etat FROM abonnes WHERE email = 'directrice@chu-exemple.fr'").etat, "en_attente");
+assert.ok(mm[0].additional_headers.some((h) => h.key === "Reply-To"));
+raz(); await ab("/abonnement", "POST", { email: "directrice@chu-exemple.fr" }, "2026-09-21T07:05:00Z"); assert.equal(tems().length, 0);
+raz(); await ab("/abonnement", "POST", { email: "directrice@chu-exemple.fr" }, "2026-09-21T07:12:00Z"); mm = tems(); assert.equal(mm.length, 1);
+assert.ok(mm[0].text.includes(jeton), "meme jeton a la relance");
+ok("abonnement : CORS, 503 sans cle, 400 sur forme, confirmation envoyee, relance limitee a 10 min"); raz();
+// 22. confirmation par BOUTON : un antivirus qui suit le lien ne confirme rien
+rep = await ab(`/abonnement/confirmer?j=${jeton}`, "GET", undefined, "2026-09-21T07:13:00Z");
+assert.equal(rep.status, 200); assert.match(await rep.text(), /<form method="post">/); assert.equal(ligne("SELECT etat FROM abonnes").etat, "en_attente");
+assert.match(rep.headers.get("Content-Security-Policy"), /form-action 'self'/);
+rep = await ab(`/abonnement/confirmer?j=${jeton}`, "POST", undefined, "2026-09-21T07:14:00Z");
+assert.equal(rep.status, 200); assert.equal(ligne("SELECT etat FROM abonnes").etat, "actif");
+assert.equal((await ab("/abonnement/confirmer?j=faux", "GET", undefined, "2026-09-21T07:14:00Z")).status, 404);
+raz(); await ab("/abonnement", "POST", { email: "directrice@chu-exemple.fr" }, "2026-09-21T07:40:00Z"); assert.equal(tems().length, 0);
+ok("confirmation : GET affiche un bouton, POST active, lien faux en 404, abonne actif non relance"); raz();
+// 23. une panne de production previent l'abonne, avec desinscription en un clic
+reponses["https://prod/api/sante"] = KO; await tick("2026-09-21T08:01:00Z"); await tick("2026-09-21T08:02:00Z");
+mm = tems(); assert.equal(mm.length, 1); assert.match(mm[0].subject, /incident en cours/); assert.match(mm[0].text, /Depuis 10:02/);
+assert.ok(mm[0].additional_headers.some((h) => h.key === "List-Unsubscribe" && h.value.includes(`desinscrire?j=${jeton}`)));
+assert.ok(mm[0].additional_headers.some((h) => h.key === "List-Unsubscribe-Post"));
+assert.ok(!/base|503|HTTP/.test(mm[0].text), "aucun detail technique pour le client");
+ok("panne de production : l'abonne est prevenu, sans detail technique, desinscription en un clic"); raz();
+// 24. rafale : retabli puis nouvelle panne en moins de 10 min -> un seul courriel, le plus recent
+reponses["https://prod/api/sante"] = OK; await tick("2026-09-21T08:03:00Z"); await tick("2026-09-21T08:04:00Z"); assert.equal(tems().length, 0);
+reponses["https://prod/api/sante"] = KO; await tick("2026-09-21T08:05:00Z"); await tick("2026-09-21T08:06:00Z"); assert.equal(tems().length, 0);
+await tick("2026-09-21T08:11:00Z"); assert.equal(tems().length, 0);
+await tick("2026-09-21T08:12:00Z"); mm = tems(); assert.equal(mm.length, 1); assert.match(mm[0].subject, /incident en cours/);
+reponses["https://prod/api/sante"] = DEG; raz(); await tick("2026-09-21T08:23:00Z"); await tick("2026-09-21T08:24:00Z");
+mm = tems(); assert.equal(mm.length, 1); assert.match(mm[0].subject, /dégradé/); assert.match(mm[0].text, /envoi des e-mails/);
+reponses["https://prod/api/sante"] = OK; raz(); await tick("2026-09-21T08:35:00Z"); await tick("2026-09-21T08:36:00Z");
+mm = tems(); assert.equal(mm.length, 1); assert.match(mm[0].subject, /rétabli/);
+ok("rafale fusionnee (un seul courriel, le plus recent), degrade en mots de client, retablissement"); raz();
+// 25. le test ne previent jamais les abonnes
+reponses["https://test/api/sante"] = "reseau"; await tick("2026-09-21T08:40:00Z"); await tick("2026-09-21T08:45:00Z"); assert.equal(tems().length, 0);
+reponses["https://test/api/sante"] = OK; await tick("2026-09-21T08:50:00Z"); await tick("2026-09-21T08:55:00Z"); raz();
+ok("test : aucune alerte aux abonnes");
+// 26. Scaleway refuse : reessais espaces, abandon signale au PO apres 5 essais
+tem.ko = true; reponses["https://prod/api/sante"] = KO; await tick("2026-09-21T09:01:00Z"); await tick("2026-09-21T09:02:00Z");
+assert.equal(ligne("SELECT essais FROM envois WHERE genre = 'etat'").essais, 1);
+for (const iso of ["2026-09-21T09:08:00Z", "2026-09-21T09:19:00Z", "2026-09-21T09:35:00Z", "2026-09-21T09:56:00Z"]) await tick(iso);
+assert.equal(ligne("SELECT statut FROM envois WHERE genre = 'etat'").statut, "abandon");
+assert.ok(pushs().some((x) => /apres 5 essais/.test(x.message) && x.priority === "1"));
+tem.ko = false; reponses["https://prod/api/sante"] = OK; await tick("2026-09-21T10:01:00Z"); await tick("2026-09-21T10:02:00Z");
+ok("Scaleway en echec : 5 essais espaces, puis abandon signale au PO"); raz();
+// 27. desinscription : GET = bouton, POST (ou clic de la messagerie) = adresse effacee
+rep = await ab(`/abonnement/desinscrire?j=${jeton}`, "GET", undefined, "2026-09-21T10:05:00Z");
+assert.match(await rep.text(), /Me désinscrire/); assert.equal(ligne("SELECT COUNT(*) AS c FROM abonnes").c, 1);
+rep = await ab(`/abonnement/desinscrire?j=${jeton}`, "POST", undefined, "2026-09-21T10:05:30Z");
+assert.equal(rep.status, 200); assert.equal(ligne("SELECT COUNT(*) AS c FROM abonnes").c, 0);
+assert.match(await (await ab(`/abonnement/desinscrire?j=${jeton}`, "GET", undefined, "2026-09-21T10:06:00Z")).text(), /Déjà désinscrit/);
+ok("desinscription : bouton, puis adresse effacee"); raz();
+// 28. RGPD : une inscription jamais confirmee s'efface apres 48 h ; le tableau compte les abonnes
+await ab("/abonnement", "POST", { email: "oubli@exemple.fr" }, "2026-09-21T10:10:00Z");
+await tick("2026-09-23T06:00:00Z"); assert.equal(ligne("SELECT COUNT(*) AS c FROM abonnes WHERE email = 'oubli@exemple.fr'").c, 1);
+await tick("2026-09-24T06:00:00Z"); assert.equal(ligne("SELECT COUNT(*) AS c FROM abonnes WHERE email = 'oubli@exemple.fr'").c, 0);
+await ab("/abonnement", "POST", { email: "compte@exemple.fr" }, "2026-09-24T07:00:00Z");
+const tb = await (await tableau(new Request("https://vigie/", { headers: { Authorization: "Basic " + btoa("lsd:mdp") } }), env, new Date("2026-09-24T07:01:00Z"))).text();
+assert.match(tb, /0 abonné\(s\) actif\(s\) · 1 en attente de confirmation/);
+ok("inscription non confirmee effacee apres 48 h ; le tableau compte les abonnes"); raz();
+
+// 29. erreur GitHub n'empeche pas la sonde
 globalThis.fetch = (f => async (u, o) => u.startsWith("https://api.github.com") ? new Response("nope", { status: 401 }) : f(u, o))(globalThis.fetch);
-await assert.rejects(tick("2026-09-21T12:22:00Z"), /dispatch refuse : HTTP 401/); ok("GitHub en echec : invocation en echec, sonde quand meme faite");
+await assert.rejects(tick("2026-09-24T12:22:00Z"), /dispatch refuse : HTTP 401/); ok("GitHub en echec : invocation en echec, sonde quand meme faite");
 console.log(`banc : ${n} scenarios passes`);
