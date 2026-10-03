@@ -86,20 +86,27 @@ reponses["https://test/api/sante"] = "reseau";
 await tick("2026-09-19T11:21:00Z"); assert.equal(appels.filter((a) => a.url.startsWith("https://test")).length, 0); ok("test : pas sonde hors multiples de 5"); raz();
 await tick("2026-09-19T11:25:00Z"); await tick("2026-09-19T11:31:00Z"); await tick("2026-09-19T11:35:00Z"); p = pushs(); assert.equal(p.length, 1); assert.equal(p[0].priority, "0"); assert.match(p[0].title, /test/); assert.match(p[0].message, /INJOIGNABLE/); ok("test : alerte apres 2 sondes, priorite normale"); raz();
 await tick("2026-09-19T13:40:00Z"); assert.equal(pushs().length, 0); ok("test : pas de rappel horaire"); raz();
-// 10. Pushover en panne : l'etat n'est pas ecrit, la minute suivante reessaie
+// 10. [lot 6, P3-02] Pushover en panne : la transition est ENREGISTREE quand meme, l'alerte
+//     est mise en attente et rejouee a la minute suivante, une seule fois
 reponses["https://prod/api/sante"] = KO; await tick("2026-09-19T13:41:00Z");
-globalThis.PUSHOVER_KO = true; await assert.rejects(tick("2026-09-19T13:42:00Z"), /Pushover refuse/); assert.equal(ligne("SELECT verdict FROM etat WHERE env='production'").verdict, "ok"); raz();
-globalThis.PUSHOVER_KO = false; await tick("2026-09-19T13:43:00Z"); p = pushs(); assert.equal(p.length, 1); assert.equal(p[0].priority, "2"); assert.equal(ligne("SELECT verdict FROM etat WHERE env='production'").verdict, "hors_service"); ok("Pushover en echec : invocation en echec, reessai la minute suivante"); raz();
+globalThis.PUSHOVER_KO = true; await assert.rejects(tick("2026-09-19T13:42:00Z"), /Pushover refuse/);
+assert.equal(ligne("SELECT verdict FROM etat WHERE env='production'").verdict, "hors_service");
+assert.equal(ligne("SELECT COUNT(*) AS c FROM compteurs WHERE cle = 'alerte:production'").c, 1); raz();
+globalThis.PUSHOVER_KO = false; await tick("2026-09-19T13:43:00Z"); p = pushs(); assert.equal(p.length, 1); assert.equal(p[0].priority, "2");
+assert.match(p[0].message, /HORS SERVICE depuis 15:42/); assert.match(p[0].message, /alerte differee/);
+assert.equal(ligne("SELECT COUNT(*) AS c FROM compteurs WHERE cle LIKE 'alerte:%'").c, 0); raz();
+await tick("2026-09-19T13:44:00Z"); assert.equal(pushs().length, 0);
+ok("Pushover en echec : transition enregistree, alerte differee rejouee une seule fois"); raz();
 // 11. classification des reponses
 reponses["https://x/"] = { status: 500, corps: { erreur: "x" } }; assert.equal((await sonder("https://x/")).verdict, "injoignable");
 reponses["https://x/"] = { status: 200, corps: { etat: "hors service" } }; assert.equal((await sonder("https://x/")).verdict, "hors_service");
 reponses["https://x/"] = "timeout"; const s = await sonder("https://x/"); assert.equal(s.verdict, "injoignable"); assert.match(s.detail, /10 s/); ok("classification des reponses");
 // 12. mesures horaires et journal des transitions
 const m = ligne("SELECT SUM(n) AS n, SUM(ko) AS ko FROM mesures WHERE env='production'");
-assert.ok(m.n === 22 && m.ko === 10, JSON.stringify(m)); // 22 passages simules, dont 10 non ok (4 panne, 1 delai, 2 degrade, 3 panne)
+assert.ok(m.n === 23 && m.ko === 11, JSON.stringify(m)); // 23 passages simules, dont 11 non ok (4 panne, 1 delai, 2 degrade, 4 panne dont le rejeu)
 const tr = db.prepare("SELECT de, vers FROM transitions WHERE env='production' ORDER BY id").all().map((x) => `${x.de}>${x.vers}`);
 assert.deepEqual(tr, ["ok>hors_service", "hors_service>ok", "ok>degrade", "degrade>ok", "ok>hors_service"]); ok("mesures horaires et transitions journalisees");
-reponses["https://prod/api/sante"] = OK; await tick("2026-09-19T13:44:00Z"); await tick("2026-09-19T13:45:00Z"); raz();
+reponses["https://prod/api/sante"] = OK; await tick("2026-09-19T13:45:00Z"); await tick("2026-09-19T13:46:00Z"); raz();
 
 // 13. /signal : ferme sans jeton, refuse un mauvais jeton, une forme invalide
 assert.equal((await signal({ env: "production", type: "tache", nom: "purges", ok: true }, "x", undefined, { ...env, VIGIE_SIGNAL_JETON: "" })).status, 404);
@@ -129,13 +136,19 @@ await signal({ env: "test", type: "anomalie", nom: "courriel", ok: false, detail
 p = pushs(); assert.equal(p[0].priority, "0"); assert.match(p[0].message, /Anomalie « courriel »/); ok("anomalie du test : priorite normale"); raz();
 // 17. echeances : domaine dans 20 j -> alerte hebdomadaire puis quotidienne ; RDAP en panne -> derniere lecture
 rdap.date = "2026-10-10";
+db.prepare("CREATE TABLE IF NOT EXISTS echeances (cle TEXT PRIMARY KEY, nom TEXT, date TEXT, source TEXT, verifie TEXT, derniere_alerte TEXT)").run();
+db.prepare("INSERT OR REPLACE INTO echeances (cle, nom, date, source) VALUES ('scaleway', 'ancienne ligne unique', '2027-09-16', 'x')").run(); // [lot 6] ligne perimee
 await verifierEcheances(env, new Date("2026-09-20T06:00:00Z")); p = pushs(); assert.equal(p.length, 1); assert.equal(p[0].priority, "1"); assert.match(p[0].message, /cursusconnect.com : expire dans 19 jour/); raz();
 await verifierEcheances(env, new Date("2026-09-21T06:00:00Z")); assert.equal(pushs().length, 0); raz();
 await verifierEcheances(env, new Date("2026-09-27T06:00:00Z")); assert.equal(pushs().length, 1); raz();
 await verifierEcheances(env, new Date("2026-10-04T06:00:00Z")); assert.equal(pushs().length, 1); raz();
 await verifierEcheances(env, new Date("2026-10-05T06:00:00Z")); assert.equal(pushs().length, 1); raz();
 rdap.ko = true; await verifierEcheances(env, new Date("2026-10-06T06:00:00Z")); p = pushs(); assert.equal(p.length, 1); assert.match(p[0].message, /expire dans 3 jour/); rdap.ko = false; raz(); // 10.10 00:00 - 06.10 06:00 = 3,75 j
-assert.equal(ligne("SELECT COUNT(*) AS c FROM echeances").c, 3); ok("echeances : preavis 30 j, hebdomadaire puis quotidien, RDAP en panne tolere"); raz();
+assert.equal(ligne("SELECT COUNT(*) AS c FROM echeances").c, 6); // [lot 6] 5 echeances fixes + le domaine
+assert.equal(ligne("SELECT COUNT(*) AS c FROM echeances WHERE cle = 'scaleway'").c, 0);
+assert.deepEqual(db.prepare("SELECT cle, date FROM echeances WHERE cle NOT LIKE 'domaine:%' ORDER BY cle").all().map((x) => `${x.cle}=${x.date}`),
+  ["carte-ovh=2027-02-28", "github=2027-09-19", "scaleway-production=2027-09-15", "scaleway-test=2027-08-22", "scaleway-vigie=2027-09-19"]);
+ok("echeances : preavis 30 j, hebdomadaire puis quotidien, RDAP en panne tolere ; registre a 5 lignes fixes, ligne perimee retiree"); raz();
 // 18. tableau de bord : ferme, protege, echappe
 const req = (auth) => new Request("https://vigie/", { headers: auth ? { Authorization: auth } : {} });
 assert.equal((await tableau(req(), { ...env, VIGIE_TABLEAU_MDP: "" }, new Date("2026-09-20T12:00:00Z"))).status, 404);
@@ -259,6 +272,28 @@ rr = await w.fetch(new Request("https://vigie/tableau", { headers: { Authorizati
 assert.equal(rr.status, 200);
 ok("tableau sous /tableau ; la racine repond 404 sans demander de mot de passe");
 
+// 36. [lot 6, P1-07] la sauvegarde hors site : silence normal d'une semaine, alerte au-dela de 8 jours
+await signal({ env: "production", type: "tache", nom: "sauvegarde-hors-site", ok: true, detail: "sauvegarde #16" }, undefined, "2026-10-05T04:10:00Z");
+raz(); await tick("2026-10-12T23:30:00Z"); assert.equal(pushs().filter((x) => /sauvegarde-hors-site/.test(x.message)).length, 0); // 7 j 19 h 20 : normal
+raz(); await tick("2026-10-13T04:30:00Z"); p = pushs().filter((x) => /sauvegarde-hors-site/.test(x.message));
+assert.equal(p.length, 1); assert.equal(p[0].priority, "1"); assert.match(p[0].message, /n'a pas tourne depuis 192 h 20 \(attendu : moins de 192 h\)/);
+raz(); await signal({ env: "production", type: "tache", nom: "sauvegarde-hors-site", ok: false, detail: "restauration en echec" }, undefined, "2026-10-13T05:00:00Z");
+p = pushs(); assert.equal(p.length, 1); assert.match(p[0].message, /« sauvegarde-hors-site » a echoue/); assert.match(p[0].message, /restauration en echec/);
+ok("sauvegarde hors site : silence d'une semaine normal, alerte au-dela de 8 jours, echec signale"); raz();
+// 37. [lot 6, P2-04] la carte bancaire OVH : preavis de 30 jours
+await verifierEcheances(env, new Date("2027-01-27T06:00:00Z")); assert.equal(pushs().filter((x) => /Carte bancaire/.test(x.message)).length, 0); raz();
+await verifierEcheances(env, new Date("2027-01-28T06:00:00Z")); p = pushs().filter((x) => /Carte bancaire/.test(x.message));
+assert.equal(p.length, 1); assert.match(p[0].message, /expire dans 30 jour\(s\), le 28\/02\/2027/); ok("carte bancaire OVH : rien a 31 jours, alerte a 30 jours"); raz();
+// 38. [lot 6, P3-02] Pushover en panne pendant une panne de production : l'abonne est prevenu quand meme
+db.prepare("INSERT INTO abonnes (email, jeton, etat, cree, confirme) VALUES ('suivi@exemple.fr', 'j-suivi', 'actif', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z')").run();
+reponses["https://prod/api/sante"] = KO; raz(); await tick("2027-02-01T10:01:00Z");
+globalThis.PUSHOVER_KO = true; await assert.rejects(tick("2027-02-01T10:02:00Z"), /Pushover refuse/);
+mm = tems(); assert.equal(mm.length, 1); assert.equal(mm[0].to[0].email, "suivi@exemple.fr"); assert.match(mm[0].subject, /incident en cours/);
+assert.equal(db.prepare("SELECT vers FROM transitions WHERE env='production' ORDER BY id DESC LIMIT 1").get().vers, "hors_service");
+globalThis.PUSHOVER_KO = false; raz(); await tick("2027-02-01T10:03:00Z"); p = pushs().filter((x) => /HORS SERVICE/.test(x.message));
+assert.equal(p.length, 1); assert.match(p[0].message, /alerte differee/);
+reponses["https://prod/api/sante"] = OK; await tick("2027-02-01T10:04:00Z"); await tick("2027-02-01T10:05:00Z");
+ok("Pushover en panne : transition journalisee, abonne prevenu, alerte rejouee ensuite"); raz();
 // 35. erreur GitHub n'empeche pas la sonde
 globalThis.fetch = (f => async (u, o) => u.startsWith("https://api.github.com") ? new Response("nope", { status: 401 }) : f(u, o))(globalThis.fetch);
 await assert.rejects(tick("2026-09-30T12:22:00Z"), /dispatch refuse : HTTP 401/); ok("GitHub en echec : invocation en echec, sonde quand meme faite");

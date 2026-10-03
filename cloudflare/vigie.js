@@ -70,15 +70,25 @@ const MESURES_JOURS = 7;
 // Taches planifiees du produit (vercel.json) : delai au-dela duquel leur silence
 // est une anomalie. purges : 03:00 UTC chaque jour. sauvegardes : 10:00 et 16:00
 // UTC, le plus long silence normal va de 16:00 a 10:00 (18 h).
-const TACHES = { purges: 26, sauvegardes: 20 };
+// [lot 6, P1-07] sauvegarde-hors-site : workflow GitHub du lundi 03:17 UTC (souvent
+// en retard de plusieurs heures) ; silence normal d'une semaine, alerte au-dela de
+// 8 jours. Le signal part de la derniere etape du workflow, reussi ou non.
+const TACHES = { purges: 26, sauvegardes: 20, "sauvegarde-hors-site": 192 };
 const RAPPEL_TACHE_MS = 6 * 60 * 60 * 1000;
 const ANTI_RAFALE_ANOMALIE_MS = 60 * 60 * 1000;
 
 // Echeances connues, sans lien avec une API : a tenir a jour a chaque rotation
 // (journal des rotations). Le domaine est lu en direct (RDAP).
+// [lot 6, P2-04 / P2-07] Une entree par cle (dates deduites le 20.09.2026, geste 0.6 :
+// creation + 1 an, inscrites LA VEILLE faute de date a la seconde), le jeton GitHub de
+// la vigie (inchange) et la carte bancaire du compte OVHcloud (un impaye suspendrait
+// les deux bases).
 const ECHEANCES_FIXES = [
-  { cle: "scaleway", nom: "Cle API Scaleway (envoi des e-mails, test et production)", date: "2027-09-16" },
+  { cle: "scaleway-test", nom: "Cle API Scaleway du test (envoi des e-mails)", date: "2027-08-22" },
+  { cle: "scaleway-production", nom: "Cles API Scaleway du 16.09.2026 (production)", date: "2027-09-15" },
+  { cle: "scaleway-vigie", nom: "Cle API Scaleway de la vigie (abonnements)", date: "2027-09-19" },
   { cle: "github", nom: "Jeton GitHub de la vigie", date: "2027-09-19" },
+  { cle: "carte-ovh", nom: "Carte bancaire du compte OVHcloud", date: "2027-02-28" },
 ];
 const DOMAINES = ["cursusconnect.com"];
 const PREAVIS_JOURS = 30;
@@ -107,6 +117,7 @@ export default {
     const tache = async (nom, f) => { try { await f(); } catch (e) { console.error(`${nom} : ${e.message}`); erreurs.push(`${nom} : ${e.message}`); } };
 
     await tache("schema", () => preparer(env));
+    await tache("alertes differees", () => rejouerAlertes(env)); // [lot 6, P3-02]
     await tache("sonde production", () => surveiller(env, "production", env.SONDE_PRODUCTION_URL, t));
     if (env.SONDE_TEST_URL && minute % 5 === 0) await tache("sonde test", () => surveiller(env, "test", env.SONDE_TEST_URL, t));
     if (MINUTES_DECLENCHEMENT.includes(minute)) await tache("declenchement GitHub", () => declencherReleve(env));
@@ -228,18 +239,20 @@ async function surveiller(env, nom, url, t) {
     return;
   }
 
-  // Transition confirmee : alerter d'abord, enregistrer ensuite (un echec Pushover
-  // laisse l'etat inchange, donc la minute suivante reessaie).
+  // Transition confirmee. [lot 6, P3-02] ENREGISTRER et PREVENIR LES ABONNES d'abord,
+  // Pushover ensuite : une panne de Pushover ne bloque plus ni le journal des
+  // transitions ni les courriels aux abonnes. L'alerte refusee est mise en attente
+  // et rejouee chaque minute (rejouerAlertes) jusqu'a ce que Pushover l'accepte.
   const priorite = nom === "production" ? ({ ok: 0, degrade: 1 }[releve.verdict] ?? 2) : 0;
   const message = releve.verdict === "ok"
     ? `Retabli a ${heureLocale(maintenant)} apres ${duree(etat.depuis, maintenant)}. Version ${releve.version || "?"}, reponse en ${releve.ms} ms.`
     : `${libelle(releve.verdict).toUpperCase()} depuis ${heureLocale(maintenant)}. ${releve.detail}${releve.http ? ` (HTTP ${releve.http})` : ""}. ${CONFIRMATIONS} releves consecutifs.`;
-  await pushover(env, `Cursus Connect - ${nom}`, message, priorite);
   await ecrireEtat(env, nom, { verdict: releve.verdict, depuis: maintenant, en_attente: null, compte: 0,
                                derniere_alerte: maintenant, detail: releve.detail, maj: maintenant });
   await env.ETAT.prepare("INSERT INTO transitions (env, de, vers, t, detail) VALUES (?, ?, ?, ?, ?)")
     .bind(nom, etat.verdict, releve.verdict, maintenant, releve.detail || "").run();
   if (nom === "production") await notifierAbonnes(env, etat, releve, t);
+  await alerterTransition(env, nom, `Cursus Connect - ${nom}`, message, priorite);
 }
 
 // Une ligne par heure et par environnement : nombre de releves, releves non ok,
@@ -332,6 +345,30 @@ export async function epreuver(env, nom, urlSante, t, motif) {
           JSON.stringify((corps.epreuves || []).map((x) => ({ nom: x.nom, ok: !!x.ok, ms: x.ms || 0, detail: String(x.detail || "").slice(0, 120) }))), derniere).run();
   console.log(`epreuve ${nom} (${motif}) : ${corps.ok ? "ok" : "ECHEC"} ${corps.reussies || 0}/${corps.total || 0}`);
   return corps;
+}
+
+/* --- [lot 6, P3-02] alerte de transition : differee si Pushover est en panne ------ */
+// Une seule alerte en attente par environnement (la plus recente remplace l'ancienne :
+// c'est l'etat present qui compte). L'echec est releve pour marquer l'invocation.
+async function alerterTransition(env, nom, titre, message, priorite) {
+  const cle = `alerte:${nom}`;
+  try {
+    await pushover(env, titre, message, priorite);
+    await env.ETAT.prepare("DELETE FROM compteurs WHERE cle = ?").bind(cle).run();
+  } catch (e) {
+    await env.ETAT.prepare(`INSERT INTO compteurs (cle, n, valeur) VALUES (?, 1, ?)
+      ON CONFLICT(cle) DO UPDATE SET n = compteurs.n + 1, valeur = excluded.valeur`)
+      .bind(cle, JSON.stringify({ titre, message, priorite })).run();
+    throw e;
+  }
+}
+export async function rejouerAlertes(env) {
+  const { results } = await env.ETAT.prepare("SELECT cle, valeur FROM compteurs WHERE cle LIKE 'alerte:%'").all();
+  for (const a of results || []) {
+    const { titre, message, priorite } = JSON.parse(a.valeur);
+    await pushover(env, titre, `${message} (alerte differee : Pushover etait indisponible)`, priorite);
+    await env.ETAT.prepare("DELETE FROM compteurs WHERE cle = ?").bind(a.cle).run();
+  }
 }
 
 /* --- Pushover ---------------------------------------------------------------- */
@@ -442,6 +479,10 @@ async function echeanceDomaine(domaine) {
 }
 export async function verifierEcheances(env, t) {
   const liste = ECHEANCES_FIXES.map((e) => ({ ...e, source: "journal des rotations" }));
+  // [lot 6] une echeance retiree du registre (ex. l'ancienne ligne unique "scaleway")
+  // ne doit pas rester au tableau de bord : seules les cles fixes et les domaines restent.
+  const gardees = ECHEANCES_FIXES.map((e) => e.cle).concat(DOMAINES.map((d) => `domaine:${d}`));
+  await env.ETAT.prepare(`DELETE FROM echeances WHERE cle NOT IN (${gardees.map(() => "?").join(", ")})`).bind(...gardees).run();
   for (const d of DOMAINES) {
     try { liste.push({ cle: `domaine:${d}`, nom: `Nom de domaine ${d}`, date: await echeanceDomaine(d), source: "RDAP" }); }
     catch (e) {
