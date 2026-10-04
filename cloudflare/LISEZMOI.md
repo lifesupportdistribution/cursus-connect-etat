@@ -88,11 +88,26 @@ Le test : priorité normale pour tout, sans rappel.
 | `VIGIE_TABLEAU_MDP` | secret | mot de passe du tableau de bord — absent = tableau fermé |
 | `SCW_TEM_CLE` | secret | clé d'API Scaleway (envoi Transactional Email) — absent = abonnement fermé (503) |
 | `SCW_PROJET` | texte | identifiant du projet Scaleway qui porte le domaine d'envoi |
-| `ABONNEMENT_EXPEDITEUR` | texte | `etat@cursusconnect.com` (domaine vérifié chez Scaleway) |
+| `ABONNEMENT_EXPEDITEUR` | texte | `ne-pas-repondre@notifications.cursusconnect.com` (domaine vérifié chez Scaleway ; relevé le 04.10.2026) |
 | `ABONNEMENT_ORIGINE` | texte | `https://status.cursusconnect.com` |
 | `VIGIE_URL` | texte | `https://cursus-connect-vigie.fabien-boch.workers.dev` (liens des courriels) |
 | `ETAT` | liaison D1 | base SQLite ; ses tables se créent seules |
-| Cron Trigger | `* * * * *` | |
+| `VERSION_CODE` | métadonnées de version | identifiant et étiquette de la version en service (tableau de bord, « Code en service ») — déclarée dans `wrangler.toml` |
+| Cron Trigger | `* * * * *` | déclaré dans `wrangler.toml` |
+
+Les liaisons, le déclencheur, la date de compatibilité et les journaux sont
+**décrits dans `cloudflare/wrangler.toml`** et posés à chaque déploiement. Les
+variables texte et les secrets ci-dessus restent **dans Cloudflare** :
+`keep_vars = true` garde les variables, et un déploiement ne touche jamais aux
+secrets. Ce dépôt reste donc sans secret ni adresse.
+
+Secrets **du dépôt GitHub** (Settings → Secrets and variables → Actions), pour le
+déploiement et le contrôle du matin :
+
+| Nom | Rôle |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | jeton Cloudflare limité aux Workers de ce compte ; **échéance 04.10.2027**, au registre de la vigie (`ECHEANCES_FIXES`) |
+| `CLOUDFLARE_ACCOUNT_ID` | identifiant du compte Cloudflare |
 
 D1 et non KV : KV est à cohérence différée (jusqu'à 60 s). Une sonde à la
 minute qui relit un état périmé juste après l'avoir écrit alerterait deux fois.
@@ -111,10 +126,22 @@ Responsable : Life Support Distribution. À inscrire au registre des traitements
 
 ## Déployer une nouvelle version
 
-1. *Modifier le code* → coller `vigie.js` en entier → **Déployer** (l'éditeur
-   doit afficher 0 erreur).
-2. Vérifier dans *Déploiements* que le « Déploiement actif » porte la nouvelle
-   version.
+**Depuis le 04.10.2026 (lot 10 du registre d'audit, P2-03), uniquement depuis ce
+dépôt.** Pousser dans `main` une modification de `cloudflare/vigie.js`,
+`cloudflare/wrangler.toml` ou de leurs bancs déclenche `vigie-deployer.yml` :
+
+1. le banc de la vigie et celui du contrôle de conformité (comptes exacts) ;
+2. `wrangler deploy` (version épinglée), version **étiquetée** par l'empreinte de
+   `vigie.js` et de `wrangler.toml` (identifiants de blob git, 10 caractères
+   chacun) ; le message de la version porte le commit ;
+3. la vérification, par l'API Cloudflare, que la version active porte cette
+   étiquette.
+
+Le même workflow se relance à la main (*Actions → vigie-deployer → Run workflow*).
+**Plus de copier-coller dans l'éditeur** : une version qui n'en viendrait pas n'a
+pas d'étiquette ; le tableau de bord l'affiche en rouge (« SANS étiquette :
+déployée hors du dépôt ») et le contrôle du matin (`vigie-conformite.yml`,
+demandé par la vigie à 06:05 UTC) échoue, ce qui envoie l'e-mail de GitHub.
 
 ## Cinq pièges du tableau de bord (constatés les 19 et 20.09.2026)
 
@@ -132,17 +159,22 @@ Responsable : Life Support Distribution. À inscrire au registre des traitements
 
 ## Éprouver sans casser la production
 
-- **Le banc** : `node cloudflare/vigie.banc.mjs` rejoue 38 scénarios sans réseau
+- **Le banc** : `node cloudflare/vigie.banc.mjs` rejoue ses scénarios (compte exact
+  vérifié par le banc lui-même) sans réseau
   ni Cloudflare. D1 y est simulée par le SQLite intégré à Node (Node 22.13 ou
   plus) : les requêtes du Worker sont exécutées pour de vrai. Heures simulées
   seulement : le banc passe quelle que soit l'heure réelle.
 - **L'alerte** : pointer `SONDE_PRODUCTION_URL` sur une adresse qui répond 404
   (celle du Worker lui-même convient), **promouvoir la version**, attendre deux
   minutes : alerte urgence. Remettre l'adresse, promouvoir : « Retabli ».
+  [lot 10] Ces versions faites dans le tableau de bord n'ont pas d'étiquette :
+  relancer ensuite `vigie-deployer` pour revenir à la version du dépôt, sinon le
+  contrôle du matin échoue — c'est son rôle.
 - **Le chien de garde de `releve.yml`** : remplacer le Cron Trigger par
   `0-6,8-21,23-36,38-51,53-59 * * * *` pendant plus d'une heure, puis remettre
   `* * * * *` (supprimer et recréer). Le relevé suivant échoue avec
-  « Declencheur muet ».
+  « Declencheur muet ». [lot 10] Le prochain déploiement repose de toute façon le
+  déclencheur de `wrangler.toml`.
 - **Un signal** : `curl -X POST <adresse>/signal -H "Authorization: Bearer <jeton>"
   -H "Content-Type: application/json" -d '{"env":"test","type":"anomalie","nom":"essai","ok":false,"detail":"essai"}'`
   → notification de priorité normale ; le même avec `"ok":true` → « resolue ».

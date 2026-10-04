@@ -3,6 +3,8 @@
 // sont celles du Worker, executees pour de vrai. Heures SIMULEES uniquement.
 //   node cloudflare/vigie.banc.mjs
 import w, { sonder, recevoirSignal, tableau, verifierEcheances, abonnement, epreuver } from "./vigie.js";
+// [lot 10] compte EXACT des scenarios : un scenario saute ne passe plus inapercu.
+const SCENARIOS_ATTENDUS = 44;
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 
@@ -144,10 +146,10 @@ await verifierEcheances(env, new Date("2026-09-27T06:00:00Z")); assert.equal(pus
 await verifierEcheances(env, new Date("2026-10-04T06:00:00Z")); assert.equal(pushs().length, 1); raz();
 await verifierEcheances(env, new Date("2026-10-05T06:00:00Z")); assert.equal(pushs().length, 1); raz();
 rdap.ko = true; await verifierEcheances(env, new Date("2026-10-06T06:00:00Z")); p = pushs(); assert.equal(p.length, 1); assert.match(p[0].message, /expire dans 3 jour/); rdap.ko = false; raz(); // 10.10 00:00 - 06.10 06:00 = 3,75 j
-assert.equal(ligne("SELECT COUNT(*) AS c FROM echeances").c, 6); // [lot 6] 5 echeances fixes + le domaine
+assert.equal(ligne("SELECT COUNT(*) AS c FROM echeances").c, 7); // [lot 6] 5 echeances fixes + le domaine ; [lot 10] + le jeton Cloudflare
 assert.equal(ligne("SELECT COUNT(*) AS c FROM echeances WHERE cle = 'scaleway'").c, 0);
 assert.deepEqual(db.prepare("SELECT cle, date FROM echeances WHERE cle NOT LIKE 'domaine:%' ORDER BY cle").all().map((x) => `${x.cle}=${x.date}`),
-  ["carte-ovh=2027-02-28", "github=2027-09-19", "scaleway-production=2027-09-15", "scaleway-test=2027-08-22", "scaleway-vigie=2027-09-19"]);
+  ["carte-ovh=2027-02-28", "cloudflare-deploiement=2027-10-04", "github=2027-09-19", "scaleway-production=2027-09-15", "scaleway-test=2027-08-22", "scaleway-vigie=2027-09-19"]);
 ok("echeances : preavis 30 j, hebdomadaire puis quotidien, RDAP en panne tolere ; registre a 5 lignes fixes, ligne perimee retiree"); raz();
 // 18. tableau de bord : ferme, protege, echappe
 const req = (auth) => new Request("https://vigie/", { headers: auth ? { Authorization: auth } : {} });
@@ -294,7 +296,33 @@ globalThis.PUSHOVER_KO = false; raz(); await tick("2027-02-01T10:03:00Z"); p = p
 assert.equal(p.length, 1); assert.match(p[0].message, /alerte differee/);
 reponses["https://prod/api/sante"] = OK; await tick("2027-02-01T10:04:00Z"); await tick("2027-02-01T10:05:00Z");
 ok("Pushover en panne : transition journalisee, abonne prevenu, alerte rejouee ensuite"); raz();
+// 39. [lot 10, P2-03] a 06:05 UTC, la vigie demande a GitHub le controle de conformite,
+//     une seule fois ; le releve reste aux minutes 07, 22, 37, 52
+reponses["https://prod/api/sante"] = OK; reponses["https://test/api/sante"] = OK;
+raz(); await tick("2027-02-02T06:04:00Z"); assert.equal(appels.filter((a) => a.url.includes("vigie-conformite.yml")).length, 0);
+raz(); await tick("2027-02-02T06:05:00Z"); let gh = appels.filter((a) => a.url.includes("api.github.com"));
+assert.equal(gh.length, 1); assert.match(gh[0].url, /\/repos\/lifesupportdistribution\/cursus-connect-etat\/actions\/workflows\/vigie-conformite\.yml\/dispatches$/);
+assert.equal(JSON.parse(gh[0].o.body).ref, "main"); assert.equal(gh[0].o.headers.Authorization, "Bearer g");
+raz(); await tick("2027-02-02T06:06:00Z"); assert.equal(github(), 0);
+raz(); await tick("2027-02-02T06:07:00Z"); gh = appels.filter((a) => a.url.includes("api.github.com")); assert.equal(gh.length, 1); assert.match(gh[0].url, /releve\.yml/);
+ok("06:05 UTC : controle de conformite demande a GitHub une seule fois ; releve inchange"); raz();
+// 40. [lot 10, P2-03] le tableau dit QUEL code tourne : etiquette du depot, version sans etiquette, liaison absente
+const pageAvec = async (e) => (await tableau(new Request("https://vigie/tableau", { headers: { Authorization: "Basic " + btoa("lsd:mdp") } }), e, new Date("2027-02-02T07:00:00Z"))).text();
+let tv = await pageAvec({ ...env, VERSION_CODE: { id: "0f1e2d3c-aaaa-bbbb-cccc-111122223333", tag: "f824f2b68f-0a1b2c3d4e", timestamp: "2027-02-01T09:00:00Z" } });
+assert.match(tv, /Code en service/); assert.match(tv, /étiquette f824f2b68f-0a1b2c3d4e · version 0f1e2d3c du 01\/02 10:00 · déployée depuis le dépôt/);
+assert.doesNotMatch(tv, /hors du dépôt/);
+tv = await pageAvec({ ...env, VERSION_CODE: { id: "9f8e7d6c-aaaa-bbbb-cccc-111122223333", tag: "", timestamp: "2027-02-01T10:00:00Z" } });
+assert.match(tv, /version 9f8e7d6c du 01\/02 11:00 SANS étiquette : déployée hors du dépôt/);
+tv = await pageAvec({ ...env, VERSION_CODE: { id: "1", tag: "<script>", timestamp: "" } }); assert.match(tv, /étiquette &lt;script&gt;/);
+tv = await pageAvec(env); assert.match(tv, /métadonnées de version absentes/);
+ok("tableau : etiquette du code en service ; version sans etiquette et liaison absente signalees ; texte echappe"); raz();
+// 41. [lot 10, P2-03] le jeton Cloudflare de deploiement : preavis de 30 jours
+await verifierEcheances(env, new Date("2027-09-02T06:00:00Z")); assert.equal(pushs().filter((x) => /Jeton Cloudflare/.test(x.message)).length, 0); raz();
+await verifierEcheances(env, new Date("2027-09-03T06:00:00Z")); p = pushs().filter((x) => /Jeton Cloudflare/.test(x.message));
+assert.equal(p.length, 1); assert.equal(p[0].priority, "1"); assert.match(p[0].message, /Jeton Cloudflare de deploiement de la vigie : expire dans 30 jour\(s\), le 04\/10\/2027/);
+ok("jeton Cloudflare de deploiement : rien a 31 jours, alerte a 30 jours"); raz();
 // 35. erreur GitHub n'empeche pas la sonde
 globalThis.fetch = (f => async (u, o) => u.startsWith("https://api.github.com") ? new Response("nope", { status: 401 }) : f(u, o))(globalThis.fetch);
 await assert.rejects(tick("2026-09-30T12:22:00Z"), /dispatch refuse : HTTP 401/); ok("GitHub en echec : invocation en echec, sonde quand meme faite");
-console.log(`banc : ${n} scenarios passes`);
+assert.equal(n, SCENARIOS_ATTENDUS, `banc : ${n} scenarios joues, ${SCENARIOS_ATTENDUS} attendus`);
+console.log(`banc : ${n} scenarios passes (${SCENARIOS_ATTENDUS} attendus)`);

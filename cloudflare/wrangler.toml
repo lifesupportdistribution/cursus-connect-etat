@@ -1,0 +1,52 @@
+# Cursus Connect — la vigie telle qu'elle tourne, pour wrangler
+# (lot 10 du registre d'audit 1.577.0, P2-03 — 04.10.2026).
+#
+# Ce fichier DECRIT le Worker en service, releve dans le tableau de bord Cloudflare
+# le 04.10.2026 : meme nom, meme date de compatibilite, meme base D1, meme
+# declencheur, memes journaux. Il ne contient ni secret ni adresse :
+#   * les 6 secrets restent dans Cloudflare (un deploiement ne les touche pas) ;
+#   * les 7 variables texte aussi : keep_vars = true les garde telles quelles.
+#
+# Deploye UNIQUEMENT par .github/workflows/vigie-deployer.yml (banc, puis deploiement,
+# puis verification). Chaque version porte une ETIQUETTE = empreinte de vigie.js et de
+# ce fichier ; vigie-conformite.yml verifie chaque matin que la version active la porte.
+
+name = "cursus-connect-vigie"
+main = "vigie.js"
+compatibility_date = "2026-09-19"
+
+# Le fichier du depot est envoye TEL QUEL, sans assemblage : ce qui tourne est,
+# octet pour octet, ce qui est versionne ici.
+no_bundle = true
+
+# Variables texte : celles du tableau de bord sont gardees (voir LISEZMOI.md).
+keep_vars = true
+
+# Adresse publique de la vigie : https://cursus-connect-vigie.fabien-boch.workers.dev
+# (VIGIE_URL). Les adresses d'apercu restent fermees, comme avant.
+workers_dev = true
+preview_urls = false
+
+[triggers]
+crons = ["* * * * *"]
+
+# Base SQLite (juridiction UE). Ses tables se creent seules (preparer() dans vigie.js).
+[[d1_databases]]
+binding = "ETAT"
+database_name = "cursus-connect-vigie"
+database_id = "3bdd7cf6-f72a-4c93-be90-480339cafe03"
+
+# Identifiant et etiquette de la version en service, lus par le tableau de bord
+# (« Code en service »). Une version sans etiquette vient d'ailleurs que du depot.
+[version_metadata]
+binding = "VERSION_CODE"
+
+# Journaux Workers actives, journaux d'invocation compris, echantillonnage 100 % ;
+# traces desactivees (etat du 04.10.2026).
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+invocation_logs = true

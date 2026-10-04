@@ -1,0 +1,41 @@
+# Cursus Connect — CONTROLE QUOTIDIEN DE LA VIGIE (lot 10 du registre d'audit, P2-03).
+#
+# Le code en service chez Cloudflare est-il celui de ce depot ? La version active doit
+# servir 100 % du trafic et porter l'etiquette que vigie-deployer.yml pose a chaque
+# deploiement (empreinte de cloudflare/vigie.js et de cloudflare/wrangler.toml).
+# Un ecart — code modifie dans l'editeur Cloudflare, version promue a la main, depot
+# modifie mais pas deploye — fait ECHOUER ce workflow, et GitHub envoie l'e-mail.
+#
+# Demande chaque jour par la vigie a 06:05 UTC (workflow_dispatch, comme le releve) ;
+# le cron ci-dessous est un filet, le planificateur de GitHub abandonnant souvent ses passages.
+# Contre-preuve : « Run workflow » avec une etiquette attendue fausse doit echouer.
+name: vigie-conformite
+
+on:
+  schedule:
+    - cron: "41 7 * * *"
+  workflow_dispatch:
+    inputs:
+      etiquette_attendue:
+        description: "Contre-preuve seulement : etiquette attendue forcee (vide = celle du depot)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  controler:
+    runs-on: ubuntu-24.04   # epingle : ubuntu-latest passe a Ubuntu 26 le 19.10.2026
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: La vigie en service est celle du depot
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ETIQUETTE_ATTENDUE: ${{ inputs.etiquette_attendue }}
+        run: node scripts/conformite-vigie.mjs

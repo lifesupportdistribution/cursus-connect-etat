@@ -30,6 +30,8 @@ ni nom d'hôte, ni identifiant, ni donnée personnelle — seulement « ça rép
 | Historique consigné | `public/historique.json` | écrit et poussé à chaque relevé |
 | Alerte en cas de panne | échec du workflow → e-mail GitHub | à la panne |
 | Page publique | `public/` | déployée par Cloudflare Pages |
+| Vigie (Worker Cloudflare) | `cloudflare/` | déployée par `.github/workflows/vigie-deployer.yml` à chaque modification, jamais à la main |
+| Contrôle de la vigie | `scripts/conformite-vigie.mjs` | chaque matin (`.github/workflows/vigie-conformite.yml`) : le code en service est celui du dépôt |
 
 L'historique est **versionné** : il ne s'efface pas au bout de 90 jours comme les
 exécutions GitHub, et git en garde toutes les révisions.

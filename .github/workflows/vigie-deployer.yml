@@ -1,0 +1,74 @@
+# Cursus Connect — DEPLOIEMENT DE LA VIGIE depuis ce depot (lot 10 du registre d'audit, P2-03).
+#
+# Jusqu'au 04.10.2026, la vigie se deployait par copier-coller dans l'editeur Cloudflare :
+# rien ne garantissait que le code en service fut cloudflare/vigie.js, et le banc validait
+# le fichier, pas ce qui tournait. Desormais ce workflow est la SEULE voie :
+#   1. le banc de la vigie (compte exact de scenarios) et celui du controle de conformite ;
+#   2. wrangler deploy avec cloudflare/wrangler.toml, version ETIQUETEE par l'empreinte de
+#      vigie.js et de wrangler.toml (secrets et variables texte du Worker : intacts) ;
+#   3. verification par l'API Cloudflare que la version active porte cette etiquette.
+# Chaque matin, vigie-conformite.yml refait la verification 3 (demande par la vigie a 06:05 UTC).
+#
+# Secrets du depot : CLOUDFLARE_API_TOKEN (jeton limite aux Workers de ce compte, echeance
+# 04.10.2027 au registre de la vigie) et CLOUDFLARE_ACCOUNT_ID. Un depot PUBLIC ne donne
+# pas ses secrets aux pull requests venues d'ailleurs ; ce workflow ne se declenche que sur
+# une poussee dans main ou a la main.
+name: vigie-deployer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cloudflare/vigie.js"
+      - "cloudflare/wrangler.toml"
+      - "cloudflare/vigie.banc.mjs"
+      - "scripts/conformite-vigie.mjs"
+      - "scripts/conformite-vigie.banc.mjs"
+      - ".github/workflows/vigie-deployer.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vigie-deployer
+  cancel-in-progress: false
+
+jobs:
+  deployer:
+    runs-on: ubuntu-24.04   # epingle : ubuntu-latest passe a Ubuntu 26 le 19.10.2026
+    timeout-minutes: 10
+    env:
+      WRANGLER_SEND_METRICS: "false"
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Banc de la vigie (44 scenarios)
+        run: node cloudflare/vigie.banc.mjs
+
+      - name: Banc du controle de conformite (7 scenarios)
+        run: node scripts/conformite-vigie.banc.mjs
+
+      - name: Etiquette du code a deployer
+        id: etiquette
+        run: echo "valeur=$(node scripts/conformite-vigie.mjs --etiquette)" >> "$GITHUB_OUTPUT"
+
+      - name: Secrets de deploiement presents
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "::error::secret CLOUDFLARE_API_TOKEN absent du depot"; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "::error::secret CLOUDFLARE_ACCOUNT_ID absent du depot"; exit 1; }
+
+      - name: Deployer la vigie (wrangler 4.147.0)
+        working-directory: cloudflare
+        run: >-
+          npx --yes wrangler@4.147.0 deploy
+          --tag "${{ steps.etiquette.outputs.valeur }}"
+          --message "depot cursus-connect-etat, commit ${GITHUB_SHA::12}"
+
+      - name: Le code en service est ce code
+        run: node scripts/conformite-vigie.mjs --attendre 120

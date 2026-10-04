@@ -16,7 +16,10 @@
 //      Elle est rejouee des qu'une NOUVELLE VERSION apparait sur un environnement :
 //      c'est la garantie « ce qui est teste en test fonctionne en production ».
 //   6. a 06:00 UTC, verifie les echeances (cles, jetons, domaine) et envoie une
-//      preuve de vie muette.
+//      preuve de vie muette ;
+//   7. [lot 10, P2-03] a 06:05 UTC, demande a GitHub le CONTROLE DE CONFORMITE
+//      (vigie-conformite.yml) : la version active de ce Worker doit porter
+//      l'etiquette du depot, c'est-a-dire avoir ete deployee par vigie-deployer.yml.
 //
 // Et sur demande (fetch) :
 //   POST /signal   le produit se signale lui-meme (taches, anomalies) ; jeton Bearer
@@ -45,6 +48,13 @@
 //   ETAT                  D1       base "cursus-connect-vigie" (coherence forte :
 //                                  KV est a coherence differee, jusqu'a 60 s, ce qui
 //                                  ferait doubler les alertes)
+//   VERSION_CODE          metadonnees de version (wrangler.toml) : identifiant et
+//                                  etiquette de la version en service, au tableau de bord
+//
+// [lot 10, P2-03] DEPLOIEMENT : uniquement par .github/workflows/vigie-deployer.yml
+// (banc, wrangler deploy, verification), avec cloudflare/wrangler.toml. Plus de
+// copier-coller dans l'editeur Cloudflare : une version qui n'en viendrait pas n'a
+// pas d'etiquette, le tableau le dit et le controle du matin echoue.
 //
 // Etats : ok | degrade | hors_service | injoignable. Priorites Pushover, production :
 //   hors_service, injoignable -> 2 (urgence : sonne jusqu'a accuse de reception)
@@ -54,11 +64,13 @@
 
 const DEPOT = "lifesupportdistribution/cursus-connect-etat";
 const WORKFLOW = "releve.yml";
+const WORKFLOW_CONFORMITE = "vigie-conformite.yml"; // [lot 10, P2-03]
 const BRANCHE = "main";
 const MINUTES_DECLENCHEMENT = [7, 22, 37, 52];
 const MINUTE_TACHES = 30;
 const MINUTE_PREUVE_DE_VIE = { h: 6, m: 0 }; // UTC
 const MINUTE_EPREUVE = { h: 5, m: 50 };     // UTC, avant la preuve de vie qui en rend compte
+const MINUTE_CONFORMITE = { h: 6, m: 5 };   // UTC, hors de la minute chargee de 06:00
 const DELAI_EPREUVE_MS = 60000;
 const CONFIRMATIONS = 2;        // releves identiques d'affilee avant de changer d'etat
 const RAPPEL_MS = 60 * 60 * 1000;
@@ -89,6 +101,8 @@ const ECHEANCES_FIXES = [
   { cle: "scaleway-vigie", nom: "Cle API Scaleway de la vigie (abonnements)", date: "2027-09-19" },
   { cle: "github", nom: "Jeton GitHub de la vigie", date: "2027-09-19" },
   { cle: "carte-ovh", nom: "Carte bancaire du compte OVHcloud", date: "2027-02-28" },
+  // [lot 10, P2-03] jeton du deploiement par GitHub Actions (secret CLOUDFLARE_API_TOKEN)
+  { cle: "cloudflare-deploiement", nom: "Jeton Cloudflare de deploiement de la vigie", date: "2027-10-04" },
 ];
 const DOMAINES = ["cursusconnect.com"];
 const PREAVIS_JOURS = 30;
@@ -131,6 +145,9 @@ export default {
       await tache("echeances", () => verifierEcheances(env, t));
       await tache("preuve de vie", () => preuveDeVie(env, t));
       await tache("menage", () => menage(env, t));
+    }
+    if (heure === MINUTE_CONFORMITE.h && minute === MINUTE_CONFORMITE.m) {
+      await tache("controle de conformite", () => declencherWorkflow(env, WORKFLOW_CONFORMITE));
     }
 
     if (erreurs.length) throw new Error(erreurs.join(" | ")); // marque l'invocation en echec dans les journaux
@@ -383,15 +400,16 @@ async function pushover(env, titre, message, priorite) {
 }
 
 /* --- 3. GitHub ----------------------------------------------------------------- */
-async function declencherReleve(env) {
-  const r = await fetch(`https://api.github.com/repos/${DEPOT}/actions/workflows/${WORKFLOW}/dispatches`, {
+const declencherReleve = (env) => declencherWorkflow(env, WORKFLOW);
+async function declencherWorkflow(env, fichier) {
+  const r = await fetch(`https://api.github.com/repos/${DEPOT}/actions/workflows/${fichier}/dispatches`, {
     method: "POST",
     headers: { "Authorization": `Bearer ${env.GITHUB_JETON}`, "Accept": "application/vnd.github+json",
                "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "cursus-connect-vigie", "Content-Type": "application/json" },
     body: JSON.stringify({ ref: BRANCHE }),
   });
   if (!r.ok) throw new Error(`dispatch refuse : HTTP ${r.status} - ${(await r.text()).slice(0, 300)}`);
-  console.log(`dispatch accepte : HTTP ${r.status}`);
+  console.log(`dispatch ${fichier} accepte : HTTP ${r.status}`);
 }
 
 /* --- signaux du produit ---------------------------------------------------------- */
@@ -566,9 +584,21 @@ export async function tableau(requete, env, t) {
     .reduce((a, x) => ({ ...a, [x.etat]: x.n }), {});
   const file = (await q("SELECT statut, COUNT(*) AS n FROM envois GROUP BY statut"))
     .reduce((a, x) => ({ ...a, [x.statut]: x.n }), {});
-  return new Response(pageTableau({ t, etats, mesures, transitions, signaux, echeances, abonnes, file, epreuves }), {
+  return new Response(pageTableau({ t, etats, mesures, transitions, signaux, echeances, abonnes, file, epreuves, code: codeEnService(env) }), {
     headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
                "X-Robots-Tag": "noindex", "Referrer-Policy": "no-referrer" } });
+}
+
+/* [lot 10, P2-03] QUEL CODE TOURNE. La liaison de metadonnees de version
+   (wrangler.toml, VERSION_CODE) donne l'identifiant de la version en service et son
+   ETIQUETTE, posee par vigie-deployer.yml : empreinte de vigie.js et de wrangler.toml.
+   Une version sans etiquette a ete faite ailleurs, dans l'editeur Cloudflare. */
+export function codeEnService(env) {
+  const v = env.VERSION_CODE;
+  if (!v || !v.id) return { depot: false, texte: "métadonnées de version absentes : version antérieure au déploiement depuis le dépôt" };
+  const quand = v.timestamp ? ` du ${dateHeure(v.timestamp)}` : "";
+  if (!v.tag) return { depot: false, texte: `version ${String(v.id).slice(0, 8)}${quand} SANS étiquette : déployée hors du dépôt (éditeur Cloudflare ?)` };
+  return { depot: true, texte: `étiquette ${v.tag} · version ${String(v.id).slice(0, 8)}${quand} · déployée depuis le dépôt` };
 }
 
 const echapper = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -576,8 +606,8 @@ const COULEUR = { ok: "#1d7a46", degrade: "#b7791f", hors_service: "#b3261e", in
 const dateHeure = (iso) => iso ? new Intl.DateTimeFormat("fr-FR", { timeZone: FUSEAU, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(iso)) : "-";
 
 /** @param {{ t: Date, etats: any[], mesures: any[], transitions: any[], signaux: any[], echeances: any[],
- *   abonnes?: Record<string, number>, file?: Record<string, number>, epreuves?: any[] }} p */
-export function pageTableau({ t, etats, mesures, transitions, signaux, echeances, abonnes = {}, file = {}, epreuves = [] }) {
+ *   abonnes?: Record<string, number>, file?: Record<string, number>, epreuves?: any[], code?: { depot: boolean, texte: string } }} p */
+export function pageTableau({ t, etats, mesures, transitions, signaux, echeances, abonnes = {}, file = {}, epreuves = [], code = null }) {
   const carte = (e) => {
     const m = mesures.filter((x) => x.env === e.env);
     const n = m.reduce((a, x) => a + x.n, 0), ko = m.reduce((a, x) => a + x.ko, 0);
@@ -617,6 +647,7 @@ p{margin:4px 0;font-size:13px}</style></head><body>
 <section class="bloc"><h2>Épreuve d'environnement — « ce qui est testé en test fonctionne en production »</h2>${epreuves.length ? `<table><tr><th>Env.</th><th>Verdict</th><th>Réglages</th><th>Version</th><th>Quand</th><th>Motif</th><th>En défaut</th></tr>${epreuves.map((e) => { let d = []; try { d = JSON.parse(e.detail || "[]"); } catch { d = []; } const ko = d.filter((x) => !x.ok); return `<tr><td>${echapper(e.env)}</td><td style="color:${e.ok ? "#1d7a46" : "#b3261e"};font-weight:600">${e.ok ? "opérant" : "EN ÉCHEC"}</td><td>${e.reussies}/${e.total}</td><td>${echapper(e.version || "-")}</td><td>${echapper(dateHeure(e.t))}</td><td>${echapper(e.motif)}</td><td>${ko.length ? ko.map((x) => `${echapper(x.nom)} — ${echapper(x.detail)}`).join("<br>") : "—"}</td></tr>`; }).join("")}</table>` : "<p>Aucune épreuve encore : première à 07:50 (Paris), ou dès la prochaine version.</p>"}</section>
 <section class="bloc"><h2>Tâches et signaux du produit</h2>${signaux.length ? `<table><tr><th>Env.</th><th>Type</th><th>Nom</th><th>État</th><th>Dernier signal</th><th>Détail</th></tr>${signaux.map(ligneSignal).join("")}</table>` : "<p>Aucun signal reçu du produit pour l'instant.</p>"}</section>
 <section class="bloc"><h2>Abonnés aux alertes d'incident</h2><p>${abonnes.actif || 0} abonné(s) actif(s) · ${abonnes.en_attente || 0} en attente de confirmation · file d'envoi : ${file.a_envoyer || 0} à envoyer${file.abandon ? `, <b style="color:#b3261e">${file.abandon} abandonné(s)</b>` : ""}</p></section>
+<section class="bloc"><h2>Code en service</h2><p style="color:${code && code.depot ? "#1d7a46" : "#b3261e"}">${echapper(code ? code.texte : "inconnu")}</p></section>
 <section class="bloc"><h2>Échéances</h2>${echeances.length ? `<table><tr><th>Quoi</th><th>Date</th><th>Reste</th><th>Source</th></tr>${echeances.map(ligneEcheance).join("")}</table>` : "<p>Première vérification à 08:00 (Paris).</p>"}</section>
 <section class="bloc"><h2>Dernières transitions</h2>${transitions.length ? `<table><tr><th>Quand</th><th>Env.</th><th>De</th><th>Vers</th><th>Détail</th></tr>${transitions.map((x) => `<tr><td>${echapper(dateHeure(x.t))}</td><td>${echapper(x.env)}</td><td>${echapper(libelle(x.de))}</td><td style="color:${COULEUR[x.vers] || "#444"}">${echapper(libelle(x.vers))}</td><td>${echapper(x.detail)}</td></tr>`).join("")}</table>` : "<p>Aucune transition journalisée.</p>"}</section>
 </main></body></html>`;
