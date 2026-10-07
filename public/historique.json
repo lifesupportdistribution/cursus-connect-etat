@@ -1,5 +1,5 @@
 {
-  "maj": "2026-10-07T12:37:37.680Z",
+  "maj": "2026-10-07T12:52:41.067Z",
   "fenetreJours": 90,
   "fuseau": "Europe/Paris",
   "service": "cursus-connect",
@@ -168,7 +168,7 @@
           "ko": 0
         },
         "2026-10-07": {
-          "n": 61,
+          "n": 62,
           "ko": 0
         }
       }
@@ -336,7 +336,7 @@
           "ko": 0
         },
         "2026-10-07": {
-          "n": 61,
+          "n": 62,
           "ko": 0
         }
       }
@@ -504,8 +504,8 @@
           "ko": 0
         },
         "2026-10-07": {
-          "n": 61,
-          "ko": 2
+          "n": 62,
+          "ko": 3
         }
       }
     },
@@ -584,7 +584,7 @@
           "ko": 0
         },
         "2026-10-07": {
-          "n": 61,
+          "n": 62,
           "ko": 0
         }
       }
@@ -592,13 +592,13 @@
   },
   "incidents": [],
   "dernier": {
-    "t": "2026-10-07T12:37:37.680Z",
+    "t": "2026-10-07T12:52:41.067Z",
     "http": 200,
     "version": "1.602.0",
     "application": true,
-    "degrade": false,
+    "degrade": true,
     "base": true,
-    "stockage": true,
+    "stockage": false,
     "courriel": true,
     "schemaEnRetard": false,
     "joignable": true
