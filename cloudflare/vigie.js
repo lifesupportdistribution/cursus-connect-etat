@@ -85,7 +85,9 @@ const MESURES_JOURS = 7;
 // [lot 6, P1-07] sauvegarde-hors-site : workflow GitHub du lundi 03:17 UTC (souvent
 // en retard de plusieurs heures) ; silence normal d'une semaine, alerte au-dela de
 // 8 jours. Le signal part de la derniere etape du workflow, reussi ou non.
-const TACHES = { purges: 26, sauvegardes: 20, "sauvegarde-hors-site": 192 };
+// [produit 1.605.0, lot D1 bis] envois-auto : la tache du matin des envois automatiques
+// reels (05:00 UTC chaque jour, api/cron/envois.js) ; alerte au-dela de 26 h, comme purges.
+const TACHES = { purges: 26, sauvegardes: 20, "sauvegarde-hors-site": 192, "envois-auto": 26 };
 const RAPPEL_TACHE_MS = 6 * 60 * 60 * 1000;
 const ANTI_RAFALE_ANOMALIE_MS = 60 * 60 * 1000;
 

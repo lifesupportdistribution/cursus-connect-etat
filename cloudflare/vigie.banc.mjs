@@ -4,7 +4,7 @@
 //   node cloudflare/vigie.banc.mjs
 import w, { sonder, recevoirSignal, tableau, verifierEcheances, abonnement, epreuver } from "./vigie.js";
 // [lot 10] compte EXACT des scenarios : un scenario saute ne passe plus inapercu.
-const SCENARIOS_ATTENDUS = 44;
+const SCENARIOS_ATTENDUS = 45;
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 
@@ -321,6 +321,12 @@ await verifierEcheances(env, new Date("2027-09-02T06:00:00Z")); assert.equal(pus
 await verifierEcheances(env, new Date("2027-09-03T06:00:00Z")); p = pushs().filter((x) => /Jeton Cloudflare/.test(x.message));
 assert.equal(p.length, 1); assert.equal(p[0].priority, "1"); assert.match(p[0].message, /Jeton Cloudflare de deploiement de la vigie : expire dans 30 jour\(s\), le 04\/10\/2027/);
 ok("jeton Cloudflare de deploiement : rien a 31 jours, alerte a 30 jours"); raz();
+// 42. [produit 1.605.0] la tache du matin des envois automatiques : muette au-dela de 26 h
+await signal({ env: "production", type: "tache", nom: "envois-auto", ok: true, detail: "envois automatiques faits" }, undefined, "2027-11-01T05:00:00Z"); raz();
+await tick("2027-11-02T06:30:00Z"); assert.equal(pushs().filter((x) => /envois-auto/.test(x.message)).length, 0); raz(); // 25 h 30 : normal
+await tick("2027-11-02T07:30:00Z"); p = pushs().filter((x) => /envois-auto/.test(x.message));
+assert.equal(p.length, 1); assert.match(p[0].message, /« envois-auto » n'a pas tourne depuis 26 h 30 \(attendu : moins de 26 h\)/);
+ok("envois automatiques : rien a 25 h 30, alerte a 26 h 30"); raz();
 // 35. erreur GitHub n'empeche pas la sonde
 globalThis.fetch = (f => async (u, o) => u.startsWith("https://api.github.com") ? new Response("nope", { status: 401 }) : f(u, o))(globalThis.fetch);
 await assert.rejects(tick("2026-09-30T12:22:00Z"), /dispatch refuse : HTTP 401/); ok("GitHub en echec : invocation en echec, sonde quand meme faite");

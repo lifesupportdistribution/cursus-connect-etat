@@ -22,7 +22,8 @@ peut donc vivre dans ce dépôt public.
    (`workflow_dispatch`) : c'est lui qui tient l'historique et la page publique.
 5. À la minute 30 de chaque heure, vérifie que les **tâches planifiées** du
    produit ont donné signe de vie : `purges` depuis moins de 26 h, `sauvegardes`
-   depuis moins de 20 h. Une tâche n'est surveillée qu'après son premier signe
+   depuis moins de 20 h, `envois-auto` (envois automatiques réels du matin, produit
+   1.605.0) depuis moins de 26 h. Une tâche n'est surveillée qu'après son premier signe
    de vie.
 6. À 05:50 UTC, joue l'**épreuve d'environnement** du produit (`POST /api/epreuve`,
    lot 1.577.0) sur la production puis sur le test. Le produit y **exerce** chaque
