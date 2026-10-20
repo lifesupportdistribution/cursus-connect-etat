@@ -22,7 +22,7 @@
 import { readFileSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-const URL_SANTE = process.env.URL_SANTE || "https://cursusconnect.com/api/sante";
+const URL_SANTE = process.env.URL_SANTE || "https://app.cursusconnect.com/api/sante"; // [20.10.2026] lot N : app.
 const FICHIER = process.env.FICHIER || "public/historique.json";
 const FENETRE = Number(process.env.FENETRE_JOURS || 90);
 const FUSEAU = process.env.FUSEAU || "Europe/Paris";

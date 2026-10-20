@@ -11,7 +11,9 @@
    dit quand même si le service marche MAINTENANT — c'est ce qu'un client vient
    chercher. L'inverse est vrai aussi. */
 
-const SANTE = "https://cursusconnect.com/api/sante";
+// [20.10.2026] L'application est servie sur app.cursusconnect.com (lot N, 1.615.0) ; la racine
+// accueillera le site vitrine.
+const SANTE = "https://app.cursusconnect.com/api/sante";
 const HISTORIQUE = "https://raw.githubusercontent.com/lifesupportdistribution/cursus-connect-etat/main/public/historique.json";
 const RYTHME_MS = 60000;
 const FENETRE = 90;

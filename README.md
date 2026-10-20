@@ -1,6 +1,6 @@
 # Cursus Connect — page d'état publique
 
-Ce dépôt contient **la page d'état de [Cursus Connect](https://cursusconnect.com)**
+Ce dépôt contient **la page d'état de [Cursus Connect](https://www.cursusconnect.com)**
 et la sonde qui l'alimente. Rien d'autre.
 
 - **Page publiée :** https://status.cursusconnect.com
