@@ -1,0 +1,41 @@
+# Cursus Connect — BANCS DE LA PAGE D'ÉTAT et du relevé (module 2, 21.10.2026).
+#
+# La page (public/) est publiée par Cloudflare Pages à chaque poussée dans main ; le relevé
+# (scripts/relever.mjs, releve.yml) tourne tous les quarts d'heure. Ce workflow ne publie rien :
+# il rejoue leurs bancs à chaque poussée qui les touche, et une coche rouge dans GitHub dit
+# qu'un changement a cassé les trois langues ou la publication concurrente des relevés.
+#   - banc des langues (9 scenarios) : mêmes textes en FR, DE, EN ; causes traduites ;
+#   - banc du relevé (9 scenarios) : deux relevés concurrents, aucun perdu.
+name: bancs-page
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "public/**"
+      - "scripts/relever.mjs"
+      - "scripts/releve.banc.mjs"
+      - "scripts/langues.banc.mjs"
+      - ".github/workflows/releve.yml"
+      - ".github/workflows/bancs-page.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bancs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Banc des langues (9 scenarios)
+        run: node scripts/langues.banc.mjs
+      - name: Banc du releve (9 scenarios)
+        run: |
+          git config --global user.email "banc@cursusconnect.invalid"
+          git config --global user.name "banc"
+          node scripts/releve.banc.mjs

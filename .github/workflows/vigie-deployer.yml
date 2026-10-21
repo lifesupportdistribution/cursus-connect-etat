@@ -48,7 +48,7 @@ jobs:
         with:
           node-version: 22
 
-      - name: Banc de la vigie (44 scenarios)
+      - name: Banc de la vigie (60 scenarios)
         run: node cloudflare/vigie.banc.mjs
 
       - name: Banc du controle de conformite (7 scenarios)

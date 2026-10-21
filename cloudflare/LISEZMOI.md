@@ -36,6 +36,25 @@ peut donc vivre dans ce dépôt public.
 7. À 06:00 UTC : les **échéances** (préavis 30 jours, rappel hebdomadaire puis
    quotidien à 7 jours), une **preuve de vie** muette (qui rend compte de
    l'épreuve), et le ménage.
+8. À la minute **41** de chaque heure (module 2, décisions E-1 à E-4), joue les
+   **parcours d'un utilisateur** sur la production, avec deux comptes du centre
+   Trois-Lacs créés dans le Personnel :
+   - `connexion` (compte « Sonde vigie ») : se connecter, puis `/api/auth/session`
+     doit nommer ce compte et son centre ;
+   - `lecture` : `/api/v1/collections/sessions-formation?limite=5` doit rendre au
+     moins une formation (la base, sous le cloisonnement du centre) ;
+   - `fichier` : déclarer `sonde-vigie.csv` au magasin transitoire `envois`,
+     le déposer au stockage par l'URL signée, le relire, puis le **retirer**
+     (`abandon`), même après un échec ;
+   - `portail` (compte « Sonde portail ») : se connecter et lire
+     `/api/v1/portail/donnees`.
+
+   Chaque requête porte l'origine de l'application (garde des mutations) ; les
+   deux sessions sont fermées à la fin. Une connexion refusée marque `lecture`
+   et `fichier` « non joué » (ni échec compté, ni alerte). Rien n'est joué si la
+   production n'est pas au vert (la panne a déjà alerté) ni si les comptes ne
+   sont pas configurés (le tableau de bord le dit). Une douzaine de requêtes par
+   passage : loin des 50 sous-requêtes du plan gratuit. Passages gardés 7 jours.
 
 **Sur demande**
 
@@ -62,13 +81,18 @@ peut donc vivre dans ce dépôt public.
 | hors service, injoignable | **urgence** : sonne chaque minute jusqu'à accusé de réception, 1 h |
 | dégradé, tâche en échec ou muette, anomalie, échéance à moins de 30 jours, **épreuve d'environnement en échec** | haute : sonne, même en heures calmes |
 | retour à la normale | normale |
+| parcours en échec **deux passages d'affilée** (une alerte, pas de répétition), parcours de nouveau réussi | normale |
 
 **Les abonnés** reçoivent, pour la production seulement : « incident en cours »
 (hors service ou injoignable), « service dégradé » (en mots de client : « le
 dépôt et la consultation des fichiers », « l'envoi des e-mails »), « service
 rétabli ». Jamais un nom de composant interne ni un code d'erreur. Une rafale
 est **fusionnée** : un courriel d'état au plus toutes les 10 minutes, portant
-l'état le plus récent. Envoi par l'API de Scaleway Transactional Email, par une
+l'état le plus récent. **Dans la langue choisie à l'abonnement** (module 2,
+décision S-2) : français, allemand ou anglais, celle de la page au moment de
+l'inscription ; les abonnés antérieurs restent en français. Confirmation, pages
+du lien, alertes et désinscription suivent cette langue (`&l=` dans les liens
+pour un lien dont le jeton est inconnu). Envoi par l'API de Scaleway Transactional Email, par une
 **file en base** : 15 courriels par minute (plafonds du plan gratuit de
 Workers), cinq essais espacés, abandon signalé à l'exploitant.
 | preuve de vie | la plus basse : muette |
@@ -92,6 +116,11 @@ Le test : priorité normale pour tout, sans rappel.
 | `ABONNEMENT_EXPEDITEUR` | texte | `ne-pas-repondre@notifications.cursusconnect.com` (domaine vérifié chez Scaleway ; relevé le 04.10.2026) |
 | `ABONNEMENT_ORIGINE` | texte | `https://status.cursusconnect.com` |
 | `VIGIE_URL` | texte | `https://cursus-connect-vigie.fabien-boch.workers.dev` (liens des courriels) |
+| `SONDE_EQUIPE_EMAIL` | texte | adresse du compte « Sonde vigie » (Trois-Lacs, rôle Assistante administrative) — absent = parcours équipe non joués |
+| `SONDE_EQUIPE_MDP` | **secret** | son mot de passe, saisi par l'exploitant dans Cloudflare, jamais ailleurs |
+| `SONDE_PORTAIL_EMAIL` | texte | adresse du compte « Sonde portail » (Trois-Lacs, apprenant avec accès au portail) — absent = parcours portail non joué |
+| `SONDE_PORTAIL_MDP` | **secret** | son mot de passe, idem |
+| `SONDE_APP_URL` | texte, facultatif | adresse de l'application des parcours — absent = `SONDE_PRODUCTION_URL` sans `/api/sante` |
 | `ETAT` | liaison D1 | base SQLite ; ses tables se créent seules |
 | `VERSION_CODE` | métadonnées de version | identifiant et étiquette de la version en service (tableau de bord, « Code en service ») — déclarée dans `wrangler.toml` |
 | Cron Trigger | `* * * * *` | déclaré dans `wrangler.toml` |
@@ -120,7 +149,7 @@ l'entrée du journal des rotations. Le nom de domaine est lu en direct (RDAP).
 ## Données personnelles (abonnement)
 
 Seule donnée : l'adresse e-mail, avec sa date d'inscription, sa date de
-confirmation et un jeton aléatoire. Base D1 en **juridiction UE**. Une
+confirmation, la langue choisie (`fr`, `de` ou `en`) et un jeton aléatoire. Base D1 en **juridiction UE**. Une
 inscription non confirmée est **effacée après 48 heures** ; une désinscription
 **efface** l'adresse. Aucune image, aucun pixel de suivi dans les courriels.
 Responsable : Life Support Distribution. À inscrire au registre des traitements.
@@ -182,7 +211,15 @@ demandé par la vigie à 06:05 UTC) échoue, ce qui envoie l'e-mail de GitHub.
 
 - **L'abonnement** : s'inscrire depuis la page d'état avec sa propre adresse,
   confirmer par le bouton du courriel, puis vérifier le compteur du tableau de
-  bord. Se désinscrire par le lien d'un courriel d'état.
+  bord. Se désinscrire par le lien d'un courriel d'état. Pour une autre langue,
+  ouvrir la page avec `?lang=de` ou `?lang=en` avant de s'inscrire.
+- **Les parcours** : le tableau de bord montre, pour chacun, le dernier verdict,
+  sa durée et les réussites sur 24 h. Pour éprouver l'alerte sans toucher au
+  produit, changer `SONDE_EQUIPE_MDP` dans Cloudflare pour une valeur fausse et
+  promouvoir la version : alerte « connexion » au deuxième passage (deux heures),
+  puis remettre le bon mot de passe et relancer `vigie-deployer`. Le compte se
+  verrouille quelques minutes après plusieurs échecs : c'est le produit qui
+  protège ses comptes, la sonde le rapporte (`compte_verrouille`).
 
 - **L'épreuve d'environnement** : `curl -X POST <adresse de l'environnement>/api/epreuve
   -H "Authorization: Bearer <jeton>" -H "Content-Type: application/json" -d '{}'`
@@ -191,7 +228,10 @@ demandé par la vigie à 06:05 UTC) échoue, ce qui envoie l'e-mail de GitHub.
 
 ## Ce qu'elle ne fait pas
 
-Elle ne voit que ce que le bulletin public déclare et ce que le produit lui
-signale. Les parcours complets d'un utilisateur (connexion, dépôt de fichier,
-portail) seront éprouvés par un compte sonde, après la création du centre de
-démonstration en production.
+Elle ne voit que ce que le bulletin public déclare, ce que le produit lui signale
+et ce que ses quatre parcours horaires éprouvent. Elle n'éprouve ni l'écriture
+d'une fiche (les parcours ne modifient aucune donnée du centre : le seul fichier
+déposé est retiré dans la minute), ni l'envoi d'un courriel du produit (c'est
+l'épreuve d'environnement du matin), ni la console LSD. Les connexions des deux
+comptes sonde figurent dans les sessions de Trois-Lacs comme celles de tout
+utilisateur.

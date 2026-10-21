@@ -32,6 +32,13 @@ ni nom d'hôte, ni identifiant, ni donnée personnelle — seulement « ça rép
 | Page publique | `public/` | déployée par Cloudflare Pages |
 | Vigie (Worker Cloudflare) | `cloudflare/` | déployée par `.github/workflows/vigie-deployer.yml` à chaque modification, jamais à la main |
 | Contrôle de la vigie | `scripts/conformite-vigie.mjs` | chaque matin (`.github/workflows/vigie-conformite.yml`) : le code en service est celui du dépôt |
+| Bancs de la page et du relevé | `scripts/langues.banc.mjs`, `scripts/releve.banc.mjs` | à chaque poussée qui les touche (`.github/workflows/bancs-page.yml`) |
+
+Deux relevés partis en même temps ne s'écrasent plus (module 2, 21.10.2026) : celui
+dont la poussée est devancée repart de la tête de branche et **rejoue son relevé**
+par-dessus (`REJOUER=1`, sans sonder de nouveau), trois essais au plus. Un relevé
+rejoué plus ancien que l'historique compte dans les barres du jour, mais ne recule
+pas la date du dernier relevé et ne rouvre pas un incident.
 
 L'historique est **versionné** : il ne s'efface pas au bout de 90 jours comme les
 exécutions GitHub, et git en garde toutes les révisions.
@@ -44,11 +51,22 @@ exécutions GitHub, et git en garde toutes les révisions.
 - **90 jours de disponibilité par composant**, dérivés des relevés.
 - **Les incidents passés**, jour par jour.
 
+**En trois langues** (module 2) : français, allemand, anglais. La langue suit
+`?lang=` dans l'adresse, sinon le choix fait par les boutons FR · DE · EN (gardé
+dans le navigateur du visiteur), sinon la langue du navigateur, sinon le français.
+Tous les textes sont dans `public/langues.js` ; le français écrit dans
+`index.html` est celui d'un navigateur sans JavaScript, et le banc vérifie qu'il
+est identique au dictionnaire. Les causes d'incident arrivent en français de
+`scripts/relever.mjs` et sont traduites par leur texte exact : **une cause
+ajoutée au relevé doit l'être aussi dans `CAUSES`**, le banc le refuse sinon.
+
 Une journée sans relevé est affichée en gris et **ne compte pas** dans le taux de
 disponibilité : une absence de mesure n'est pas une preuve de bon fonctionnement.
 
 ## Aucune donnée collectée
 
-Pas de cookie, pas de mesure d'audience, aucun appel à un service tiers. La
+Pas de cookie, pas de mesure d'audience, aucun appel à un service tiers. Le
+choix de langue reste dans le stockage local du navigateur ; rien n'est envoyé. La
 politique de sécurité de contenu servie avec la page (`public/_headers`)
-n'autorise que deux origines distantes : le service surveillé et cet historique.
+n'autorise que trois origines distantes : le service surveillé, cet historique et
+la vigie, qui reçoit les abonnements.

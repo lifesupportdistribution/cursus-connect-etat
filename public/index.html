@@ -9,37 +9,48 @@
     <link rel="stylesheet" href="etat.css" />
   </head>
   <body>
+    <!-- [module 2, 21.10.2026] Trois langues (décision PO S-1) : le texte français ci-dessous est
+         celui d'un navigateur sans JavaScript ; etat.js le remplace d'après la langue du
+         navigateur (ou le choix FR · DE · EN, mémorisé). data-t : texte ; data-t-html : texte
+         qui porte une mise en gras (dictionnaire du dépôt, jamais une donnée reçue). -->
     <div class="page">
       <header class="entete">
         <a class="marque" href="https://www.cursusconnect.com">
           <img src="logo.svg" alt="" width="40" height="40" />
           <span>
             <b>Cursus Connect</b>
-            <small>par Life Support Distribution</small>
+            <small data-t="marque.par">par Life Support Distribution</small>
           </span>
         </a>
-        <details class="abonnement">
-          <summary>Être prévenu des incidents</summary>
-          <div class="abonnement-corps">
-            <form id="form-abonnement" novalidate>
-              <p>Recevez un courriel à chaque incident de Cursus Connect, et à son rétablissement.</p>
-              <label for="abonnement-email" class="abonnement-label">Votre adresse e-mail</label>
-              <input id="abonnement-email" name="email" type="email" autocomplete="email" required
-                     maxlength="254" placeholder="prenom.nom@etablissement.fr">
-              <button type="submit" class="bouton" id="abonnement-envoyer">M'abonner</button>
-              <p class="abonnement-note" id="abonnement-message" role="status" hidden></p>
-              <p class="abonnement-mentions">
-                Un courriel de confirmation vous sera envoyé : rien ne part sans votre accord.
-                Votre adresse ne sert qu'à ces alertes. Elle est conservée dans l'Union européenne
-                tant que vous restez abonné, et effacée dès votre désinscription, possible en un
-                clic depuis chaque courriel. Responsable : Life Support Distribution.
-              </p>
-            </form>
-            <!--email_off-->
-            <p class="abonnement-secours">Une question ? <span id="adresse-alertes">support@lifesupportdistribution.fr</span></p>
-            <!--/email_off-->
-          </div>
-        </details>
+        <div class="entete-actions">
+          <nav class="langues" id="langues" aria-label="Langue" data-t-aria="langue.choix" hidden>
+            <button type="button" lang="fr" data-langue="fr" aria-pressed="true">FR</button>
+            <button type="button" lang="de" data-langue="de" aria-pressed="false">DE</button>
+            <button type="button" lang="en" data-langue="en" aria-pressed="false">EN</button>
+          </nav>
+          <details class="abonnement">
+            <summary data-t="abo.ouvrir">Être prévenu des incidents</summary>
+            <div class="abonnement-corps">
+              <form id="form-abonnement" novalidate>
+                <p data-t="abo.intro">Recevez un courriel à chaque incident de Cursus Connect, et à son rétablissement.</p>
+                <label for="abonnement-email" class="abonnement-label" data-t="abo.label">Votre adresse e-mail</label>
+                <input id="abonnement-email" name="email" type="email" autocomplete="email" required
+                       maxlength="254" placeholder="prenom.nom@etablissement.fr" data-t-placeholder="abo.exemple">
+                <button type="submit" class="bouton" id="abonnement-envoyer" data-t="abo.bouton">M'abonner</button>
+                <p class="abonnement-note" id="abonnement-message" role="status" hidden></p>
+                <p class="abonnement-mentions" data-t="abo.mentions">
+                  Un courriel de confirmation vous sera envoyé : rien ne part sans votre accord.
+                  Votre adresse ne sert qu'à ces alertes. Elle est conservée dans l'Union européenne
+                  tant que vous restez abonné, et effacée dès votre désinscription, possible en un
+                  clic depuis chaque courriel. Responsable : Life Support Distribution.
+                </p>
+              </form>
+              <!--email_off-->
+              <p class="abonnement-secours"><span data-t="abo.question">Une question ?</span> <span id="adresse-alertes">support@lifesupportdistribution.fr</span></p>
+              <!--/email_off-->
+            </div>
+          </details>
+        </div>
       </header>
 
       <!-- Le verdict. Ce qui est écrit ici est ce que voit un visiteur pendant
@@ -47,45 +58,45 @@
            avant de l'avoir vérifié. -->
       <section id="banniere" class="banniere banniere--attente" aria-live="polite">
         <span class="pastille"></span>
-        <h1 id="banniere-titre">Vérification en cours…</h1>
+        <h1 id="banniere-titre" data-t="etat.attente">Vérification en cours…</h1>
       </section>
-      <p class="banniere-detail" id="banniere-detail">Nous interrogeons le service depuis votre navigateur.</p>
+      <p class="banniere-detail" id="banniere-detail" data-t="etat.attenteDetail">Nous interrogeons le service depuis votre navigateur.</p>
 
-      <p class="fenetre-note">Disponibilité sur les <b>90 derniers jours</b>.</p>
+      <p class="fenetre-note" data-t-html="fenetre">Disponibilité sur les <b>90 derniers jours</b>.</p>
 
-      <section class="composants" id="composants" aria-label="Composants du service"></section>
+      <section class="composants" id="composants" aria-label="Composants du service" data-t-aria="composants.titre"></section>
 
       <dl class="meta">
-        <div><dt>Version en service</dt><dd id="m-version">—</dd></div>
-        <div><dt>Dernier contrôle</dt><dd id="m-controle">—</dd></div>
-        <div><dt>Relevé automatique</dt><dd id="m-releve">—</dd></div>
+        <div><dt data-t="meta.version">Version en service</dt><dd id="m-version">—</dd></div>
+        <div><dt data-t="meta.controle">Dernier contrôle</dt><dd id="m-controle">—</dd></div>
+        <div><dt data-t="meta.releve">Relevé automatique</dt><dd id="m-releve">—</dd></div>
       </dl>
 
-      <h2 class="titre-section">Incidents passés</h2>
+      <h2 class="titre-section" data-t="incidents.titre">Incidents passés</h2>
       <section class="incidents" id="incidents"></section>
 
       <section class="explication">
-        <h3>Comment cette page est mesurée</h3>
-        <p>
+        <h3 data-t="expl.titre">Comment cette page est mesurée</h3>
+        <p data-t-html="expl.p1">
           L'état affiché en haut est mesuré <b>à l'instant, depuis votre navigateur</b> : votre
           appareil interroge directement le service. Les barres et les incidents proviennent
           d'une sonde automatique qui contrôle la production <b>toutes les 15 minutes</b> et
           consigne chaque relevé.
         </p>
-        <p>
+        <p data-t-html="expl.p2">
           Cette page, sa sonde et son historique sont hébergés <b>ailleurs que Cursus Connect</b>,
           et chez d'autres fournisseurs — volontairement : une page d'état qui tombe en même
           temps que ce qu'elle surveille ne sert à rien.
         </p>
-        <p>
+        <p data-t="expl.p3">
           Aucune donnée n'est collectée ici : pas de cookie, pas de mesure d'audience, aucun
-          appel à un service tiers.
+          appel à un service tiers. Votre choix de langue reste sur votre appareil.
         </p>
       </section>
 
       <footer class="pied">
-        <span>Cursus Connect — édité par Life Support Distribution.</span>
-        <a href="https://app.cursusconnect.com">Accéder à l'application</a>
+        <span data-t="pied.editeur">Cursus Connect — édité par Life Support Distribution.</span>
+        <a href="https://app.cursusconnect.com" data-t="pied.acces">Accéder à l'application</a>
       </footer>
     </div>
 

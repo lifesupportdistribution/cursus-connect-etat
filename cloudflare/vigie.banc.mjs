@@ -4,7 +4,7 @@
 //   node cloudflare/vigie.banc.mjs
 import w, { sonder, recevoirSignal, tableau, verifierEcheances, abonnement, epreuver } from "./vigie.js";
 // [lot 10] compte EXACT des scenarios : un scenario saute ne passe plus inapercu.
-const SCENARIOS_ATTENDUS = 45;
+const SCENARIOS_ATTENDUS = 60; // [module 2] +15 : abonnement en trois langues (4), parcours (11)
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 
@@ -327,6 +327,111 @@ await tick("2027-11-02T06:30:00Z"); assert.equal(pushs().filter((x) => /envois-a
 await tick("2027-11-02T07:30:00Z"); p = pushs().filter((x) => /envois-auto/.test(x.message));
 assert.equal(p.length, 1); assert.match(p[0].message, /« envois-auto » n'a pas tourne depuis 26 h 30 \(attendu : moins de 26 h\)/);
 ok("envois automatiques : rien a 25 h 30, alerte a 26 h 30"); raz();
+// 43. [module 2, S-2] l'abonnement dans la langue de la page : allemand de bout en bout
+db.prepare("DELETE FROM abonnes").run(); db.prepare("DELETE FROM envois").run(); db.prepare("DELETE FROM compteurs").run();
+reponses["https://prod/api/sante"] = OK; reponses["https://test/api/sante"] = OK;
+raz(); rep = await ab("/abonnement", "POST", { email: "leitung@spital.example", langue: "de" }, "2027-11-03T08:00:00Z");
+assert.equal(rep.status, 202); mm = tems(); assert.equal(mm.length, 1);
+assert.equal(mm[0].subject, "Cursus Connect — bestätigen Sie Ihr Abonnement für Störungsmeldungen"); assert.equal(mm[0].from.name, "Cursus Connect — Dienststatus");
+assert.match(mm[0].text, /Um das Abonnement zu aktivieren/); assert.match(mm[0].html, /Cursus Connect — Dienststatus/);
+const jetonDe = /confirmer\?j=([0-9a-f]{48})&l=de/.exec(mm[0].text)[1];
+assert.equal(ligne("SELECT langue FROM abonnes WHERE email = 'leitung@spital.example'").langue, "de");
+ok("S-2 : inscription en allemand, confirmation en allemand (sujet, expediteur, texte), langue gardee avec l'adresse");
+let page = await (await ab(`/abonnement/confirmer?j=${jetonDe}`, "GET", undefined, "2027-11-03T08:01:00Z")).text();
+assert.match(page, /<html lang="de">/); assert.match(page, /Abonnement bestätigen/); assert.match(page, /<b>leitung@spital\.example<\/b>/);
+page = await (await ab(`/abonnement/confirmer?j=${jetonDe}`, "POST", undefined, "2027-11-03T08:02:00Z")).text(); assert.match(page, /Abonnement bestätigt/);
+page = await (await ab("/abonnement/confirmer?j=faux&l=en", "GET", undefined, "2027-11-03T08:02:00Z")).text(); assert.match(page, /Invalid or expired link/); assert.match(page, /<html lang="en">/);
+ok("pages de confirmation dans la langue de l'abonne ; lien inconnu dans la langue du lien");
+db.prepare("INSERT INTO abonnes (email, jeton, etat, cree, confirme) VALUES ('ancien@exemple.fr', 'j-ancien', 'actif', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z')").run();
+raz(); reponses["https://prod/api/sante"] = KO; await tick("2027-11-03T09:01:00Z"); await tick("2027-11-03T09:02:00Z");
+mm = tems(); assert.equal(mm.length, 2);
+const de = mm.find((x) => x.to[0].email === "leitung@spital.example"), fr = mm.find((x) => x.to[0].email === "ancien@exemple.fr");
+assert.equal(de.subject, "Cursus Connect — laufende Störung"); assert.match(de.text, /Seit 10:02 \(mitteleuropäische Zeit\) antwortet Cursus Connect nicht normal/);
+assert.match(de.text, /Abmelden: https:\/\/vigie\.test\/abonnement\/desinscrire\?j=.+&l=de/);
+assert.ok(de.additional_headers.some((h) => h.key === "List-Unsubscribe" && /&l=de>$/.test(h.value)));
+assert.equal(fr.subject, "Cursus Connect — incident en cours"); assert.match(fr.text, /Depuis 10:02 \(heure de Paris\)/); assert.match(fr.text, /Se désinscrire : https:/);
+ok("panne : courriel en allemand pour l'abonne allemand, en francais pour l'abonne anterieur (langue absente)");
+raz(); reponses["https://prod/api/sante"] = OK; await tick("2027-11-03T09:13:00Z"); await tick("2027-11-03T09:14:00Z");
+mm = tems(); const deR = mm.find((x) => x.to[0].email === "leitung@spital.example");
+assert.equal(deR.subject, "Cursus Connect — Dienst wiederhergestellt"); assert.match(deR.text, /nach 12 Min\. Störung/);
+page = await (await ab(`/abonnement/desinscrire?j=${jetonDe}`, "GET", undefined, "2027-11-03T09:20:00Z")).text(); assert.match(page, /Abmelden/);
+page = await (await ab(`/abonnement/desinscrire?j=${jetonDe}`, "POST", undefined, "2027-11-03T09:21:00Z")).text(); assert.match(page, /Abmeldung erfolgt/);
+ok("retablissement et desinscription en allemand ; adresse effacee"); raz();
+
+// 44. [module 2, E-1 a E-4] les parcours d'un utilisateur, chaque heure a la minute 41
+const app = { stockage: {}, put: 200, login: 200, portail: 200, appels: [] };
+globalThis.fetch = (f => async (u, o = {}) => {
+  const url = String(u), m = (o.method || "GET").toUpperCase();
+  const rep = (corps, status = 200, h = {}) => new Response(JSON.stringify(corps), { status, headers: { "content-type": "application/json", ...h } });
+  if (url.startsWith("https://s3.test/")) {
+    app.appels.push({ url, m, o });
+    if (m === "PUT") { if (app.put !== 200) return new Response("", { status: app.put }); app.stockage.objet = o.body; app.stockage.type = o.headers["Content-Type"]; return new Response("", { status: 200 }); }
+    return new Response(app.stockage.objet || "", { status: app.stockage.objet ? 200 : 404 });
+  }
+  if (!url.startsWith("https://prod/api/") || url.startsWith("https://prod/api/sante") || url.startsWith("https://prod/api/epreuve")) return f(u, o);
+  app.appels.push({ url, m, o, corps: o.body ? JSON.parse(o.body) : null });
+  const chemin = url.slice("https://prod".length);
+  if (chemin === "/api/auth/login") {
+    const c = JSON.parse(o.body), portail = c.email === "sonde.portail@trois-lacs.example";
+    if ((portail ? app.portail : app.login) !== 200) return rep({ ok: false, erreur: "identifiants" }, 401);
+    return rep({ ok: true, data: {} }, 200, { "set-cookie": `cc_session=${portail ? "jeton-portail" : "jeton-equipe"}; Path=/; HttpOnly; Secure; SameSite=Lax` });
+  }
+  if (chemin === "/api/auth/logout") return rep({ ok: true });
+  if (chemin === "/api/auth/session") return rep({ ok: true, data: { compte: { email: "sonde.vigie@trois-lacs.example" }, centre: { code: "ten-trois-lacs" } } });
+  if (chemin === "/api/v1/collections/sessions-formation?limite=5") return rep({ ok: true, data: { lignes: [{ id: "s1" }], suivant: null } });
+  if (chemin === "/api/v1/fichiers" && app.appels.at(-1).corps && app.appels.at(-1).corps.abandon) return rep({ ok: true, data: { id: app.appels.at(-1).corps.abandon, abandonne: true } });
+  if (chemin === "/api/v1/fichiers") return rep({ ok: true, data: { id: "fic-sonde", urlEnvoi: "https://s3.test/put", mime: "text/csv", nouveau: true } });
+  if (chemin === "/api/v1/fichiers/fic-sonde") return rep({ ok: true, data: { id: "fic-sonde", url: "https://s3.test/get" } });
+  if (chemin === "/api/v1/portail/donnees") return rep({ ok: true, data: { personneId: "p-sonde" } });
+  return rep({ ok: false }, 404);
+})(globalThis.fetch);
+const envP = { ...env, SONDE_EQUIPE_EMAIL: "sonde.vigie@trois-lacs.example", SONDE_EQUIPE_MDP: "secret-equipe", SONDE_PORTAIL_EMAIL: "sonde.portail@trois-lacs.example", SONDE_PORTAIL_MDP: "secret-portail" };
+const versApp = () => app.appels.filter((a) => a.url.startsWith("https://prod/api/"));
+reponses["https://prod/api/sante"] = OK; reponses["https://test/api/sante"] = OK;
+app.appels = []; raz(); await tick("2027-11-04T10:40:00Z", envP); assert.equal(versApp().length, 0);
+await tick("2027-11-04T10:41:00Z", envP);
+const pr = (nom) => ligne("SELECT * FROM parcours WHERE nom = ?", nom);
+assert.deepEqual(["connexion", "lecture", "fichier", "portail"].map((x) => pr(x).ok), [1, 1, 1, 1]); assert.equal(pushs().length, 0);
+ok("minute 41 : les quatre parcours reussis (rien a la minute 40), aucune alerte");
+assert.ok(versApp().every((a) => a.o.headers.Origin === "https://prod"));
+const avecCookie = versApp().filter((a) => !a.url.endsWith("/api/auth/login"));
+assert.ok(avecCookie.every((a) => /^cc_session=jeton-(equipe|portail)$/.test(a.o.headers.Cookie)));
+assert.equal(JSON.parse(versApp()[0].o.body).motDePasse, "secret-equipe");
+ok("chaque requete porte l'origine de l'application et la session de la sonde ; mot de passe lu dans le secret");
+const decl = versApp().find((a) => a.url.endsWith("/api/v1/fichiers") && a.corps && a.corps.magasin);
+assert.equal(decl.corps.magasin, "envois"); assert.equal(decl.corps.mime, "text/csv"); assert.equal(app.stockage.type, "text/csv");
+assert.ok(versApp().some((a) => a.corps && a.corps.abandon === "fic-sonde")); assert.equal(versApp().filter((a) => a.url.endsWith("/api/auth/logout")).length, 2);
+ok("fichier : declare au magasin transitoire, depose (type signe), relu, puis retire ; deux sessions fermees");
+app.put = 403; app.appels = []; raz(); await tick("2027-11-04T11:41:00Z", envP);
+assert.equal(pr("fichier").ok, 0); assert.equal(pr("fichier").echecs, 1); assert.equal(pr("fichier").etape, "depot"); assert.equal(pushs().length, 0);
+assert.ok(versApp().some((a) => a.corps && a.corps.abandon === "fic-sonde"));
+ok("depot refuse : un echec compte, pas d'alerte ; la declaration est quand meme retiree");
+raz(); await tick("2027-11-04T12:41:00Z", envP); p = pushs(); assert.equal(p.length, 1); assert.equal(p[0].priority, "0");
+assert.equal(p[0].message, "PARCOURS « fichier » EN ECHEC (2 passages d'affilee) : etape depot — stockage HTTP 403.");
+raz(); await tick("2027-11-04T13:41:00Z", envP); assert.equal(pushs().length, 0);
+ok("E-4 : deux echecs d'affilee, une alerte de priorite normale ; le troisieme ne repete pas");
+app.put = 200; raz(); await tick("2027-11-04T14:41:00Z", envP); p = pushs(); assert.equal(p.length, 1); assert.match(p[0].message, /Parcours « fichier » de nouveau reussi a 15:41/);
+ok("retour du parcours : un message");
+app.login = 401; app.appels = []; raz(); await tick("2027-11-04T15:41:00Z", envP);
+assert.equal(pr("connexion").ok, 0); assert.match(pr("connexion").detail, /HTTP 401 \(identifiants\)/); assert.equal(pr("portail").ok, 1);
+assert.equal(pr("lecture").ok, null); assert.equal(pr("lecture").detail, "non joué : connexion en échec"); assert.equal(pr("fichier").echecs, 0);
+assert.equal(versApp().filter((a) => a.url.includes("/api/v1/collections") || a.url.endsWith("/api/v1/fichiers")).length, 0);
+ok("connexion refusee : lecture et fichier non joues (dit), le portail est joue a part");
+raz(); await tick("2027-11-04T16:41:00Z", envP); p = pushs(); assert.equal(p.length, 1); assert.match(p[0].message, /PARCOURS « connexion » EN ECHEC/);
+ok("connexion refusee deux fois : UNE alerte (la connexion), pas une par parcours non joue");
+app.login = 200; raz(); await tick("2027-11-04T17:41:00Z", envP); assert.equal(pr("connexion").ok, 1); assert.equal(pr("lecture").ok, 1);
+reponses["https://prod/api/sante"] = KO; await tick("2027-11-04T18:39:00Z", envP); await tick("2027-11-04T18:40:00Z", envP);
+app.appels = []; raz(); await tick("2027-11-04T18:41:00Z", envP); assert.equal(versApp().length, 0);
+ok("production en panne : les parcours ne sont pas joues (la panne a deja alerte)");
+reponses["https://prod/api/sante"] = OK; await tick("2027-11-04T18:50:00Z", envP); await tick("2027-11-04T18:51:00Z", envP);
+app.appels = []; raz(); await tick("2027-11-04T19:41:00Z"); assert.equal(versApp().length, 0);
+let tp = await (await tableau(new Request("https://vigie/tableau", { headers: { Authorization: "Basic " + btoa("lsd:mdp") } }), env, new Date("2027-11-04T19:45:00Z"))).text();
+assert.match(tp, /Parcours d'un utilisateur — Trois-Lacs/); assert.match(tp, /Non configuré : compte « Sonde vigie »/);
+tp = await (await tableau(new Request("https://vigie/tableau", { headers: { Authorization: "Basic " + btoa("lsd:mdp") } }), envP, new Date("2027-11-04T19:45:00Z"))).text();
+assert.doesNotMatch(tp, /Non configuré/); assert.match(tp, /<td>fichier<\/td><td style="color:#1d7a46;font-weight:600">réussi/); assert.match(tp, /<td>connexion<\/td>[\s\S]*?<td>6\/8<\/td>/); assert.match(tp, /<td>lecture<\/td>[\s\S]*?<td>6\/6<\/td>/);
+ok("sans comptes sonde : rien n'est joue, le tableau le dit ; avec : verdict, duree et reussites sur 24 h");
+await tick("2027-11-12T06:00:00Z", envP); assert.equal(ligne("SELECT COUNT(*) AS n FROM parcours_journal WHERE t < '2027-11-05'").n, 0);
+ok("menage : les passages de plus de 7 jours sont effaces"); raz();
 // 35. erreur GitHub n'empeche pas la sonde
 globalThis.fetch = (f => async (u, o) => u.startsWith("https://api.github.com") ? new Response("nope", { status: 401 }) : f(u, o))(globalThis.fetch);
 await assert.rejects(tick("2026-09-30T12:22:00Z"), /dispatch refuse : HTTP 401/); ok("GitHub en echec : invocation en echec, sonde quand meme faite");

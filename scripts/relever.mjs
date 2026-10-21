@@ -16,10 +16,16 @@
    incident inexistant use la confiance dans la page, et une page d'état à
    laquelle on ne croit plus ne sert plus à rien.
 
+   [module 2, 21.10.2026] RELEVÉ JAMAIS PERDU. Le relevé mesuré est aussi écrit dans
+   RELEVE_FICHIER. Si la poussée est devancée par un autre relevé, le workflow repart
+   de la tête de branche et rejoue CE relevé (REJOUER=1) : il l'ajoute à l'historique
+   devenu plus récent, sans sonder de nouveau, sans rien signaler une seconde fois.
+
    Usage : node scripts/relever.mjs
    Variables : URL_SANTE, FICHIER (public/historique.json), FENETRE_JOURS (90),
-               FUSEAU (Europe/Paris), ESSAIS (3), ATTENTE_MS (15000). */
-import { readFileSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
+               FUSEAU (Europe/Paris), ESSAIS (3), ATTENTE_MS (15000),
+               RELEVE_FICHIER (le relevé mesuré, pour le rejouer), REJOUER (1 : rejouer). */
+import { readFileSync, writeFileSync, mkdirSync, appendFileSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 
 const URL_SANTE = process.env.URL_SANTE || "https://app.cursusconnect.com/api/sante"; // [20.10.2026] lot N : app.
@@ -124,8 +130,20 @@ function cause(e) {
   return "service indisponible";
 }
 
-const releve = await sonder();
+const REJOUER = process.env.REJOUER === "1";
+const RELEVE_FICHIER = process.env.RELEVE_FICHIER || "";
+let releve;
+if (REJOUER) {
+  if (!RELEVE_FICHIER || !existsSync(RELEVE_FICHIER)) { console.log("::error::REJOUER sans RELEVE_FICHIER lisible"); process.exit(2); }
+  releve = JSON.parse(readFileSync(RELEVE_FICHIER, "utf8"));
+  console.log(`relevé de ${releve.t} rejoué sur l'historique le plus récent`);
+} else {
+  releve = await sonder();
+  if (RELEVE_FICHIER) writeFileSync(RELEVE_FICHIER, JSON.stringify(releve) + "\n");
+}
 const h = charger();
+/* Rejoué sur un historique qui le contient déjà (même instant) : rien à ajouter. */
+if (REJOUER && h.dernier && h.dernier.t === releve.t) { console.log("relevé déjà présent dans l'historique"); process.exit(0); }
 const majPrecedente = h.maj; // lu AVANT que le releve ne l'ecrase (chien de garde, plus bas)
 const jour = jourDe(new Date(releve.t));
 const limite = jourDe(new Date(Date.now() - (FENETRE - 1) * 86400000));
@@ -140,22 +158,28 @@ for (const c of COMPOSANTS) {
   elaguer(jours, limite);
 }
 
+/* Rejoué derrière un relevé PLUS RÉCENT : il compte dans les barres du jour, mais il
+   ne rouvre ni ne ferme un incident, et ne recule pas la date du dernier relevé — le
+   plus récent a déjà dit l'état présent. */
+const enRetard = REJOUER && h.maj && releve.t < h.maj;
+
 /* Les incidents suivent l'APPLICATION : c'est ce que vit le client. Une base
    momentanément indisponible sans conséquence visible n'a pas à figurer comme
    incident — mais elle apparaît quand même dans la barre du composant. */
-const ouvert = h.incidents.find((i) => !i.fin);
-if (!releve.application) {
-  if (ouvert) { ouvert.dernier = releve.t; ouvert.releves += 1; ouvert.cause = cause(releve); }
-  else h.incidents.push({ debut: releve.t, dernier: releve.t, fin: null, releves: 1, cause: cause(releve) });
-} else if (ouvert) {
-  ouvert.fin = releve.t;
+if (!enRetard) {
+  const ouvert = h.incidents.find((i) => !i.fin);
+  if (!releve.application) {
+    if (ouvert) { ouvert.dernier = releve.t; ouvert.releves += 1; ouvert.cause = cause(releve); }
+    else h.incidents.push({ debut: releve.t, dernier: releve.t, fin: null, releves: 1, cause: cause(releve) });
+  } else if (ouvert) {
+    ouvert.fin = releve.t;
+  }
 }
 h.incidents = h.incidents.filter((i) => i.debut >= new Date(Date.now() - FENETRE * 86400000).toISOString());
 
-h.maj = releve.t;
+if (!enRetard) { h.maj = releve.t; h.dernier = releve; }
 h.fenetreJours = FENETRE;
 h.fuseau = FUSEAU;
-h.dernier = releve;
 
 mkdirSync(dirname(FICHIER), { recursive: true });
 writeFileSync(FICHIER, JSON.stringify(h, null, 2) + "\n");
@@ -172,6 +196,8 @@ console.log(`↳ ${FICHIER} : ${jour} → ${jJour.n - jJour.ko}/${jJour.n} relev
 const ecartMin = majPrecedente
   ? Math.round((Date.parse(releve.t) - Date.parse(majPrecedente)) / 60000) : 0;
 console.log(`ecart avec le releve precedent : ${ecartMin} min`);
+/* Rejoué : l'écart et le verdict ont déjà été dits au premier passage. */
+if (REJOUER) process.exit(0);
 if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `ecart_min=${ecartMin}\n`);
 
 /* --- 3. alerter ---------------------------------------------------------- */

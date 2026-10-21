@@ -9,7 +9,11 @@
 
    La séparation est volontaire : si l'historique n'est pas joignable, la page
    dit quand même si le service marche MAINTENANT — c'est ce qu'un client vient
-   chercher. L'inverse est vrai aussi. */
+   chercher. L'inverse est vrai aussi.
+
+   [module 2, 21.10.2026] Trois langues (décision PO S-1) : textes et causes dans
+   langues.js, langue d'après le navigateur, choix FR · DE · EN mémorisé sur l'appareil. */
+import { LANGUES, LOCALES, TEXTES, remplir, langueChoisie, traduireCause } from "./langues.js";
 
 // [20.10.2026] L'application est servie sur app.cursusconnect.com (lot N, 1.615.0) ; la racine
 // accueillera le site vitrine.
@@ -18,23 +22,43 @@ const HISTORIQUE = "https://raw.githubusercontent.com/lifesupportdistribution/cu
 const RYTHME_MS = 60000;
 const FENETRE = 90;
 const JOURS_INCIDENTS = 14;
+const CLE_LANGUE = "cc-etat-langue";
 
 const $ = (id) => document.getElementById(id);
-const dateHeure = (d) => new Intl.DateTimeFormat("fr-FR", { dateStyle: "short", timeStyle: "short" }).format(d);
-const heure = (d) => new Intl.DateTimeFormat("fr-FR", { timeStyle: "short" }).format(d);
-const dateLongue = (d) => new Intl.DateTimeFormat("fr-FR", { dateStyle: "long" }).format(d);
+
+/* ---------- la langue ------------------------------------------------------ */
+const lireChoix = () => { try { return localStorage.getItem(CLE_LANGUE); } catch { return null; } };
+const ecrireChoix = (l) => { try { localStorage.setItem(CLE_LANGUE, l); } catch { /* navigation privée : sans mémoire */ } };
+let langue = langueChoisie({ recherche: location.search, stockage: lireChoix(), navigateur: navigator.languages || [navigator.language] });
+const T = (cle, v) => remplir((TEXTES[langue] && TEXTES[langue][cle]) ?? TEXTES.fr[cle] ?? cle, v);
+const locale = () => LOCALES[langue] || "fr-FR";
+const dateHeure = (d) => new Intl.DateTimeFormat(locale(), { dateStyle: "short", timeStyle: "short" }).format(d);
+const heure = (d) => new Intl.DateTimeFormat(locale(), { timeStyle: "short" }).format(d);
+const dateLongue = (d) => new Intl.DateTimeFormat(locale(), { dateStyle: "long" }).format(d);
+const pourcent = (x) => new Intl.NumberFormat(locale(), { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(x);
 const jourISO = (d) => new Intl.DateTimeFormat("fr-CA",
   { year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
 
-const COMPOSANTS = [
-  { cle: "application", nom: "Application" },
-  { cle: "base", nom: "Base de données" },
-  { cle: "stockage", nom: "Stockage des fichiers" },
-  { cle: "courriel", nom: "Envoi des e-mails" },           // [1.575.0]
-];
+function appliquerLangue(l) {
+  langue = l;
+  document.documentElement.lang = l;
+  document.title = T("titre");
+  const meta = document.querySelector('meta[name="description"]'); if (meta) meta.setAttribute("content", T("description"));
+  document.querySelectorAll("[data-t]").forEach((e) => { e.textContent = T(e.dataset.t); });
+  // data-t-html : textes du dictionnaire du dépôt (mise en gras), jamais une donnée reçue
+  document.querySelectorAll("[data-t-html]").forEach((e) => { e.innerHTML = T(e.dataset.tHtml); });
+  document.querySelectorAll("[data-t-aria]").forEach((e) => { e.setAttribute("aria-label", T(e.dataset.tAria)); });
+  document.querySelectorAll("[data-t-placeholder]").forEach((e) => { e.setAttribute("placeholder", T(e.dataset.tPlaceholder)); });
+  document.querySelectorAll("#langues [data-langue]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.langue === l ? "true" : "false"));
+  const msg = $("abonnement-message"); if (msg) msg.hidden = true;
+  peindreBanniere(); peindreComposants(); peindreIncidents(); peindreMeta();
+}
+
+const COMPOSANTS = ["application", "base", "stockage", "courriel"]; // [1.575.0] courriel
 
 let vivant = null;      // dernier sondage navigateur
 let histo = null;       // dernier historique chargé
+let controle = null;    // heure du dernier sondage
 
 /* ---------- l'état vivant -------------------------------------------------- */
 
@@ -58,36 +82,37 @@ async function sonder() {
        visiteur peut être coupée. On le dit, plutôt que d'accuser à tort. */
     vivant = { joignable: false, application: false, degrade: false, base: false, stockage: false, courriel: false, version: null };
   }
-  $("m-controle").textContent = dateHeure(new Date());
-  $("m-version").textContent = vivant.version || "—";
+  controle = new Date();
+  peindreMeta();
   peindreBanniere();
   peindreComposants();
 }
 
+function peindreMeta() {
+  $("m-controle").textContent = controle ? dateHeure(controle) : "—";
+  $("m-version").textContent = (vivant && vivant.version) || "—";
+  $("m-releve").textContent = histo && histo.maj ? dateHeure(new Date(histo.maj)) : "—";
+}
+
 function peindreBanniere() {
   const b = $("banniere");
-  let classe = "attente", titre = "Vérification en cours…", detail = "";
+  let classe = "attente", titre = T("etat.attente"), detail = T("etat.attenteDetail");
   if (!vivant) { /* rien encore */ }
   else if (!vivant.joignable) {
-    classe = "panne"; titre = "Service injoignable";
-    detail = "Votre navigateur n'a pas pu joindre Cursus Connect. Si le reste de votre connexion "
-           + "fonctionne, le service est probablement en panne : nous en sommes prévenus automatiquement.";
+    classe = "panne"; titre = T("etat.injoignable"); detail = T("etat.injoignableDetail");
   } else if (vivant.application && !vivant.degrade) {
-    classe = "ok"; titre = "Tous les services fonctionnent";
-    detail = "Aucun incident en cours sur la production.";
+    classe = "ok"; titre = T("etat.ok"); detail = T("etat.okDetail");
   } else if (vivant.application) {
     /* [1.575.0] L'application sert : on nomme ce qui ne marche pas, sans rien
        dire de ce qui ne regarde pas le visiteur (protections internes). */
-    const enDefaut = COMPOSANTS.filter((c) => c.cle !== "application" && !vivant[c.cle])
-      .map((c) => c.nom.toLowerCase());
-    classe = "degrade"; titre = "Service dégradé";
-    detail = "L'application fonctionne, mais "
-      + (enDefaut.length ? enDefaut.join(" et ") + (enDefaut.length > 1 ? " sont" : " est") + " en défaut"
-                         : "l'un de ses composants internes est en défaut")
-      + ". Nous en sommes prévenus automatiquement.";
+    const enDefaut = COMPOSANTS.filter((c) => c !== "application" && !vivant[c]).map((c) => T("defaut." + c));
+    const quoi = !enDefaut.length ? T("etat.degradeInconnu")
+      : enDefaut.length === 1 ? T("etat.degradeUn", { nom: enDefaut[0] })
+      : T("etat.degradePlusieurs", { noms: enDefaut.join(T("etat.et")) });
+    classe = "degrade"; titre = T("etat.degrade");
+    detail = T("etat.degradeDetail", { quoi });
   } else {
-    classe = "panne"; titre = "Incident en cours";
-    detail = "Le service ne fonctionne pas normalement. Nos équipes en sont prévenues automatiquement.";
+    classe = "panne"; titre = T("etat.panne"); detail = T("etat.panneDetail");
   }
   b.className = "banniere banniere--" + classe;
   $("banniere-titre").textContent = titre;
@@ -106,7 +131,7 @@ function peindreComposants() {
   const hote = $("composants");
   hote.replaceChildren();
   for (const c of COMPOSANTS) {
-    const jours = (histo && histo.composants && histo.composants[c.cle] && histo.composants[c.cle].jours) || {};
+    const jours = (histo && histo.composants && histo.composants[c] && histo.composants[c].jours) || {};
 
     const bloc = document.createElement("div");
     bloc.className = "composant";
@@ -115,12 +140,12 @@ function peindreComposants() {
     tete.className = "composant-tete";
     const nom = document.createElement("span");
     nom.className = "composant-nom";
-    nom.textContent = c.nom;
+    nom.textContent = T("comp." + c);
     const etat = document.createElement("span");
     if (!vivant) { etat.textContent = "…"; etat.className = "composant-etat e--muet"; }
-    else if (!vivant.joignable) { etat.textContent = "indéterminé"; etat.className = "composant-etat e--panne"; }
-    else if (vivant[c.cle]) { etat.textContent = "Opérationnel"; etat.className = "composant-etat e--ok"; }
-    else { etat.textContent = c.cle === "application" ? "Perturbé" : "Indisponible";
+    else if (!vivant.joignable) { etat.textContent = T("comp.indetermine"); etat.className = "composant-etat e--panne"; }
+    else if (vivant[c]) { etat.textContent = T("comp.operationnel"); etat.className = "composant-etat e--ok"; }
+    else { etat.textContent = c === "application" ? T("comp.perturbe") : T("comp.indisponible");
            etat.className = "composant-etat e--panne"; }
     tete.append(nom, etat);
 
@@ -135,23 +160,21 @@ function peindreComposants() {
       const barre = document.createElement("span");
       barre.className = "b--" + e;
       barre.title = j && j.n
-        ? `${dateLongue(d)} — ${j.n - j.ko}/${j.n} relevés au vert`
-        : `${dateLongue(d)} — pas de relevé`;
+        ? T("barre.releves", { date: dateLongue(d), ok: j.n - j.ko, n: j.n })
+        : T("barre.aucun", { date: dateLongue(d) });
       barres.appendChild(barre);
       if (j && j.n) { n += j.n; ko += j.ko; mesures += 1; }
     }
 
     const echelle = document.createElement("div");
     echelle.className = "echelle";
-    const g = document.createElement("span"); g.textContent = "il y a 90 jours";
+    const g = document.createElement("span"); g.textContent = T("echelle.debut");
     const t1 = document.createElement("i");
     const taux = document.createElement("b");
-    taux.textContent = n
-      ? `${(100 * (n - ko) / n).toFixed(2).replace(".", ",")} % de disponibilité`
-      : "pas encore de mesure";
-    taux.title = n ? `${n} relevés sur ${mesures} jour(s) mesuré(s)` : "";
+    taux.textContent = n ? T("echelle.taux", { taux: pourcent(100 * (n - ko) / n) }) : T("echelle.aucune");
+    taux.title = n ? T("echelle.detail", { n, jours: mesures }) : "";
     const t2 = document.createElement("i");
-    const d = document.createElement("span"); d.textContent = "aujourd'hui";
+    const d = document.createElement("span"); d.textContent = T("echelle.fin");
     echelle.append(g, t1, taux, t2, d);
 
     bloc.append(tete, barres, echelle);
@@ -183,20 +206,20 @@ function peindreIncidents() {
       vide.className = "jour-vide";
       /* On ne prétend pas « aucun incident » un jour où l'on n'a rien mesuré :
          l'absence de mesure n'est pas une preuve de bon fonctionnement. */
-      vide.textContent = jourMesure(cle) ? "Aucun incident signalé." : "Pas de relevé ce jour-là.";
+      vide.textContent = jourMesure(cle) ? T("incidents.aucun") : T("incidents.sansReleve");
       bloc.appendChild(vide);
     } else {
       for (const x of duJour) {
         const p = document.createElement("p");
         p.className = "incident";
         const fort = document.createElement("b");
-        fort.textContent = x.fin ? "Incident résolu" : "Incident en cours";
+        fort.textContent = x.fin ? T("incidents.resolu") : T("incidents.enCours");
         const texte = document.createElement("span");
         texte.className = "quand";
+        const cause = traduireCause(x.cause, langue);
         texte.textContent = x.fin
-          ? ` — ${x.cause}, de ${heure(new Date(x.debut))} à ${heure(new Date(x.fin))} `
-            + `(${x.releves} relevé${x.releves > 1 ? "s" : ""} en échec).`
-          : ` — ${x.cause}, depuis ${heure(new Date(x.debut))}.`;
+          ? T("incidents.plage", { cause, debut: heure(new Date(x.debut)), fin: heure(new Date(x.fin)), n: x.releves })
+          : T("incidents.depuis", { cause, debut: heure(new Date(x.debut)) });
         p.append(fort, texte);
         bloc.appendChild(p);
       }
@@ -226,15 +249,16 @@ async function charger() {
          On n'affiche pas d'erreur pour des barres absentes. */
     }
   }
-  $("m-releve").textContent = histo && histo.maj ? dateHeure(new Date(histo.maj)) : "—";
+  peindreMeta();
   peindreComposants();
   peindreIncidents();
 }
 
-/* Abonnement aux alertes d'incident. La page n'envoie que l'adresse ; la vigie
-   (Worker Cloudflare, cloudflare/vigie.js) envoie le courriel de confirmation, puis
-   un courriel à chaque incident de production et à son rétablissement. Double
-   consentement : rien ne part vers une adresse qui n'a pas confirmé. */
+/* Abonnement aux alertes d'incident. La page n'envoie que l'adresse et la langue
+   affichée (décision S-2 : les courriels suivront cette langue) ; la vigie (Worker
+   Cloudflare, cloudflare/vigie.js) envoie le courriel de confirmation, puis un courriel
+   à chaque incident de production et à son rétablissement. Double consentement : rien
+   ne part vers une adresse qui n'a pas confirmé. */
 const URL_ABONNEMENT = "https://cursus-connect-vigie.fabien-boch.workers.dev/abonnement";
 const formAbonnement = document.getElementById("form-abonnement");
 if (formAbonnement) {
@@ -247,30 +271,38 @@ if (formAbonnement) {
       msg.textContent = texte; msg.hidden = false;
       msg.classList.toggle("abonnement-note--erreur", !!erreur);
     };
-    const echec = "L'inscription n'a pas abouti pour le moment. Réessayez dans quelques minutes, "
-      + "ou écrivez-nous à support@lifesupportdistribution.fr.";
     const email = champ.value.trim();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) { dire("Cette adresse ne semble pas valide.", true); champ.focus(); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) { dire(T("abo.invalide"), true); champ.focus(); return; }
     bouton.disabled = true;
     try {
       const r = await fetch(URL_ABONNEMENT, { method: "POST",
-        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email }) });
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, langue }) });
       if (r.status === 202) {
-        dire("C'est presque fait : un courriel de confirmation vient de partir vers " + email
-          + ". Cliquez sur le lien qu'il contient pour activer l'abonnement.");
+        dire(T("abo.envoye", { email }));
         champ.value = "";
-      } else if (r.status === 400) dire("Cette adresse ne semble pas valide.", true);
-      else dire(echec, true);
+      } else if (r.status === 400) dire(T("abo.invalide"), true);
+      else dire(T("abo.echec"), true);
     } catch (e) {
-      dire(echec, true);
+      dire(T("abo.echec"), true);
     } finally {
       bouton.disabled = false;
     }
   });
 }
 
-peindreComposants();
-peindreIncidents();
+/* Le choix de langue : trois boutons, mémorisés sur l'appareil. */
+const nav = $("langues");
+if (nav) {
+  nav.hidden = false;
+  nav.addEventListener("click", (ev) => {
+    const b = ev.target.closest("[data-langue]");
+    if (!b || !LANGUES.includes(b.dataset.langue)) return;
+    ecrireChoix(b.dataset.langue);
+    appliquerLangue(b.dataset.langue);
+  });
+}
+
+appliquerLangue(langue);
 sonder();
 charger();
 setInterval(sonder, RYTHME_MS);

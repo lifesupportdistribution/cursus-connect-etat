@@ -44,8 +44,15 @@ jobs:
   relever:
     runs-on: ubuntu-24.04   # epingle : ubuntu-latest passe a Ubuntu 26 le 19.10.2026
     timeout-minutes: 10
+    env:
+      RELEVE_FICHIER: /tmp/releve-mesure.json   # le relevé mesuré, pour le rejouer s'il est devancé (runner : hors du dépôt)
     steps:
+      # [module 2, 21.10.2026] La TÊTE de la branche au démarrage du travail, et non le commit du
+      # déclenchement : un passage mis en file derrière un autre part du relevé que celui-ci vient
+      # de pousser (sans ref, il repartait de l'historique d'AVANT et son relevé pouvait se perdre).
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref_name }}
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -65,11 +72,22 @@ jobs:
           else
             # [CF-Pages-Skip] en tete : Cloudflare Pages ne reconstruit pas la page pour un
             # simple releve (500 constructions/mois en offre gratuite, 96 releves/jour).
-            git commit -m "[CF-Pages-Skip] relevé $(date -u '+%Y-%m-%d %H:%M UTC')"
-            # Un relevé concurrent a pu passer devant : on se replace derrière lui
-            # plutôt que d'écraser son verdict.
-            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
-            git push origin "HEAD:${GITHUB_REF_NAME}"
+            git commit -q -m "[CF-Pages-Skip] relevé $(date -u '+%Y-%m-%d %H:%M UTC')"
+            # [module 2] Un relevé concurrent a pu passer devant : on repart de SA tête et on
+            # rejoue CE relevé par-dessus (REJOUER=1, sans sonder de nouveau). Jamais de poussée
+            # d'un historique qui ne contiendrait pas le relevé ; trois essais, puis l'échec dit.
+            for essai in 1 2 3; do
+              if git push -q origin "HEAD:${GITHUB_REF_NAME}"; then echo "relevé publié (essai $essai)"; exit 0; fi
+              echo "poussée devancée (essai $essai) : relevé rejoué sur la tête de branche"
+              git fetch -q origin "${GITHUB_REF_NAME}"
+              git reset -q --hard "origin/${GITHUB_REF_NAME}"
+              REJOUER=1 node scripts/relever.mjs
+              git add public/historique.json
+              git diff --cached --quiet && { echo "relevé déjà présent"; exit 0; }
+              git commit -q -m "[CF-Pages-Skip] relevé $(date -u '+%Y-%m-%d %H:%M UTC') (rejoué)"
+            done
+            echo "::error::Relevé non publié après trois essais : trois relevés concurrents l'ont devancé."
+            exit 1
           fi
 
       - name: Signaler la panne (c'est cet échec qui envoie l'e-mail)

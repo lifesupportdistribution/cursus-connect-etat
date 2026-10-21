@@ -20,6 +20,11 @@
 //   7. [lot 10, P2-03] a 06:05 UTC, demande a GitHub le CONTROLE DE CONFORMITE
 //      (vigie-conformite.yml) : la version active de ce Worker doit porter
 //      l'etiquette du depot, c'est-a-dire avoir ete deployee par vigie-deployer.yml.
+//   8. [module 2, decisions PO E-1 a E-4 du 20.10.2026] a la minute 41 de chaque heure, joue
+//      les PARCOURS d'un utilisateur sur la production, avec deux comptes sonde du centre de
+//      demonstration Trois-Lacs : connexion, lecture, fichier (deposer, relire, retirer) et
+//      portail etudiant. Deux echecs d'affilee d'un parcours : alerte de priorite normale ;
+//      son retour : un message. La page publique n'en dit rien (elle suit le bulletin).
 //
 // Et sur demande (fetch) :
 //   POST /signal   le produit se signale lui-meme (taches, anomalies) ; jeton Bearer
@@ -50,6 +55,12 @@
 //                                  ferait doubler les alertes)
 //   VERSION_CODE          metadonnees de version (wrangler.toml) : identifiant et
 //                                  etiquette de la version en service, au tableau de bord
+//   [module 2] PARCOURS (absents = parcours non joues, le tableau de bord le dit) :
+//   SONDE_EQUIPE_EMAIL    texte    compte d'equipe « Sonde vigie » de Trois-Lacs (Assistante administrative)
+//   SONDE_EQUIPE_MDP      secret   son mot de passe, saisi par le PO dans Cloudflare
+//   SONDE_PORTAIL_EMAIL   texte    compte etudiant « Sonde portail » de Trois-Lacs
+//   SONDE_PORTAIL_MDP     secret   son mot de passe
+//   SONDE_APP_URL         texte    facultatif : adresse de l'application (sinon celle de SONDE_PRODUCTION_URL)
 //
 // [lot 10, P2-03] DEPLOIEMENT : uniquement par .github/workflows/vigie-deployer.yml
 // (banc, wrangler deploy, verification), avec cloudflare/wrangler.toml. Plus de
@@ -71,6 +82,10 @@ const MINUTE_TACHES = 30;
 const MINUTE_PREUVE_DE_VIE = { h: 6, m: 0 }; // UTC
 const MINUTE_EPREUVE = { h: 5, m: 50 };     // UTC, avant la preuve de vie qui en rend compte
 const MINUTE_CONFORMITE = { h: 6, m: 5 };   // UTC, hors de la minute chargee de 06:00
+const MINUTE_PARCOURS = 41;                 // [module 2, E-2] chaque heure, hors des minutes des releves (07, 22, 37, 52)
+const DELAI_PARCOURS_MS = 15000;            // par requete
+const ECHECS_ALERTE = 2;                    // [E-4] deux passages en echec d'affilee
+const PARCOURS = ["connexion", "lecture", "fichier", "portail"];
 const DELAI_EPREUVE_MS = 60000;
 const CONFIRMATIONS = 2;        // releves identiques d'affilee avant de changer d'etat
 const RAPPEL_MS = 60 * 60 * 1000;
@@ -151,6 +166,7 @@ export default {
     if (heure === MINUTE_CONFORMITE.h && minute === MINUTE_CONFORMITE.m) {
       await tache("controle de conformite", () => declencherWorkflow(env, WORKFLOW_CONFORMITE));
     }
+    if (minute === MINUTE_PARCOURS) await tache("parcours", () => jouerParcours(env, t));
 
     if (erreurs.length) throw new Error(erreurs.join(" | ")); // marque l'invocation en echec dans les journaux
   },
@@ -193,7 +209,18 @@ async function preparer(env) {
     env.ETAT.prepare(`CREATE TABLE IF NOT EXISTS epreuves (env TEXT PRIMARY KEY, t TEXT, ok INTEGER, reussies INTEGER,
       total INTEGER, version TEXT, motif TEXT, detail TEXT, derniere_alerte TEXT)`),
     env.ETAT.prepare(`CREATE TABLE IF NOT EXISTS versions (env TEXT PRIMARY KEY, version TEXT, t TEXT)`),
+    // [module 2, E-1 a E-4] les parcours d'un utilisateur : l'etat de chacun, et 7 jours de passages
+    env.ETAT.prepare(`CREATE TABLE IF NOT EXISTS parcours (nom TEXT PRIMARY KEY, t TEXT, ok INTEGER, ms INTEGER,
+      etape TEXT, detail TEXT, echecs INTEGER DEFAULT 0, alerte TEXT)`),
+    env.ETAT.prepare(`CREATE TABLE IF NOT EXISTS parcours_journal (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT, t TEXT,
+      ok INTEGER, ms INTEGER, etape TEXT)`),
   ]);
+  // [module 2, S-2] la langue de l'abonne (et de chaque envoi) : colonnes ajoutees aux tables
+  // existantes ; une ligne anterieure (NULL) est en francais.
+  for (const table of ["abonnes", "envois"]) {
+    const { results } = await env.ETAT.prepare(`PRAGMA table_info(${table})`).all();
+    if (!(results || []).some((c) => c.name === "langue")) await env.ETAT.prepare(`ALTER TABLE ${table} ADD COLUMN langue TEXT`).run();
+  }
   _prepare = true;
 }
 
@@ -551,11 +578,176 @@ async function menage(env, t) {
   const limite = new Date(t.getTime() - MESURES_JOURS * 86400000).toISOString().slice(0, 13) + ":00Z";
   await env.ETAT.prepare("DELETE FROM mesures WHERE heure < ?").bind(limite).run();
   await env.ETAT.prepare("DELETE FROM transitions WHERE id NOT IN (SELECT id FROM transitions ORDER BY id DESC LIMIT 200)").run();
+  await env.ETAT.prepare("DELETE FROM parcours_journal WHERE t < ?").bind(new Date(t.getTime() - MESURES_JOURS * 86400000).toISOString()).run(); // [module 2]
   // RGPD : une inscription jamais confirmee ne se garde pas ; un envoi abandonne non plus.
   await env.ETAT.prepare("DELETE FROM abonnes WHERE etat = 'en_attente' AND cree < ?")
     .bind(new Date(t.getTime() - ATTENTE_MAX_MS).toISOString()).run();
   await env.ETAT.prepare("DELETE FROM envois WHERE statut = 'abandon' AND apres < ?")
     .bind(new Date(t.getTime() - 7 * 86400000).toISOString()).run();
+}
+
+/* --- 8. les parcours d'un utilisateur (module 2, E-1 a E-4) ----------------------------- */
+// Le bulletin public dit ce que le service declare de lui-meme ; les parcours font ce que fait
+// un utilisateur, par les memes routes que l'ecran. Deux comptes sonde de Trois-Lacs (centre de
+// demonstration de la production), crees par le PO dans Personnel : « Sonde vigie » (Assistante
+// administrative : lecture des formations, depot dans le magasin transitoire « envois ») et
+// « Sonde portail » (etudiant). Rien ne reste : le fichier depose est retire (abandon de son
+// auteur, sans droit de suppression), les sessions sont fermees.
+export function configParcours(env) {
+  const app = (env.SONDE_APP_URL || String(env.SONDE_PRODUCTION_URL || "").replace(/\/api\/sante\/?$/, "")).replace(/\/+$/, "");
+  return { app, equipe: env.SONDE_EQUIPE_EMAIL && env.SONDE_EQUIPE_MDP ? { email: env.SONDE_EQUIPE_EMAIL, mdp: env.SONDE_EQUIPE_MDP } : null,
+           portail: env.SONDE_PORTAIL_EMAIL && env.SONDE_PORTAIL_MDP ? { email: env.SONDE_PORTAIL_EMAIL, mdp: env.SONDE_PORTAIL_MDP } : null };
+}
+
+// Une requete de la sonde : origine de l'application (garde des mutations), cookie de session,
+// delai borne. Rend { status, corps } (corps JSON si lisible) ou leve une erreur nommee.
+async function appelSonde(app, chemin, { methode = "GET", corps, cookie, brut = false } = {}) {
+  const ctrl = new AbortController(); const minuteur = setTimeout(() => ctrl.abort(), DELAI_PARCOURS_MS);
+  try {
+    const entetes = { "User-Agent": "cursus-connect-vigie", "Origin": app, "Cache-Control": "no-store" };
+    if (cookie) entetes.Cookie = cookie;
+    if (corps !== undefined) entetes["Content-Type"] = "application/json";
+    const r = await fetch(chemin.startsWith("http") ? chemin : app + chemin,
+      { method: methode, headers: entetes, body: corps === undefined ? undefined : JSON.stringify(corps), signal: ctrl.signal });
+    if (brut) return { status: r.status, r };
+    let json = null; try { json = await r.json(); } catch { json = null; }
+    return { status: r.status, corps: json, r };
+  } catch (e) {
+    throw new Error(e.name === "AbortError" ? `aucune reponse en ${DELAI_PARCOURS_MS / 1000} s` : "erreur reseau");
+  } finally { clearTimeout(minuteur); }
+}
+const cookieDe = (r) => {
+  const liste = typeof r.headers.getSetCookie === "function" ? r.headers.getSetCookie() : [r.headers.get("set-cookie") || ""];
+  const m = liste.map((c) => /cc_session=([^;]+)/.exec(c || "")).find(Boolean);
+  return m ? `cc_session=${m[1]}` : null;
+};
+// Une etape : leve une erreur « etape : detail » au premier ecart.
+const exiger = (etape, cond, detail) => { if (!cond) throw Object.assign(new Error(detail), { etape }); };
+async function connecter(app, compte) {
+  const r = await appelSonde(app, "/api/auth/login", { methode: "POST", corps: { email: compte.email, motDePasse: compte.mdp } });
+  exiger("connexion", r.status === 200 && r.corps && r.corps.ok, `HTTP ${r.status}${r.corps && r.corps.erreur ? ` (${r.corps.erreur})` : ""}`);
+  const cookie = cookieDe(r.r);
+  exiger("connexion", !!cookie, "pas de cookie de session");
+  return cookie;
+}
+const deconnecter = async (app, cookie) => { if (cookie) { try { await appelSonde(app, "/api/auth/logout", { methode: "POST", cookie }); } catch { /* sans consequence */ } } };
+
+// Chaque parcours rend { ok, etape, detail } ; la duree est mesuree par l'appelant.
+export async function parcoursEquipe(app, compte, t) {
+  const res = {};
+  let cookie = null;
+  const mesurer = async (nom, f) => {
+    const debut = Date.now();
+    try { await f(); res[nom] = { ok: true, ms: Date.now() - debut, etape: "", detail: "" }; }
+    catch (e) { res[nom] = { ok: false, ms: Date.now() - debut, etape: e.etape || nom, detail: String(e.message || e).slice(0, 160) }; }
+    return res[nom].ok;
+  };
+  // connexion : se connecter, puis la session dit qui l'on est
+  const connecte = await mesurer("connexion", async () => {
+    cookie = await connecter(app, compte);
+    const s = await appelSonde(app, "/api/auth/session", { cookie });
+    exiger("session", s.status === 200 && s.corps && s.corps.ok && s.corps.data && s.corps.data.compte
+      && String(s.corps.data.compte.email).toLowerCase() === compte.email.toLowerCase() && s.corps.data.centre, `HTTP ${s.status}`);
+  });
+  if (!connecte) {
+    // Non joués, et dits comme tels : une connexion refusée donne UNE alerte (celle de la
+    // connexion), pas trois ; lecture et fichier gardent leur compte d'échecs.
+    for (const n of ["lecture", "fichier"]) res[n] = { nonJoue: true, ok: false, ms: 0, etape: "connexion", detail: "non joué : connexion en échec" };
+    return res;
+  }
+  // lecture : les formations du centre (la base, sous le cloisonnement du centre)
+  await mesurer("lecture", async () => {
+    const l = await appelSonde(app, "/api/v1/collections/sessions-formation?limite=5", { cookie });
+    exiger("lecture", l.status === 200 && l.corps && l.corps.ok && Array.isArray(l.corps.data && l.corps.data.lignes), `HTTP ${l.status}`);
+    exiger("lecture", l.corps.data.lignes.length > 0, "aucune formation lue");
+  });
+  // fichier : declarer, deposer au stockage, relire, retirer
+  await mesurer("fichier", async () => {
+    const contenu = `sonde;vigie\n${t.toISOString()}\n`;
+    const taille = new TextEncoder().encode(contenu).length;
+    const d = await appelSonde(app, "/api/v1/fichiers", { methode: "POST", cookie, corps: { magasin: "envois", nom: "sonde-vigie.csv", mime: "text/csv", taille } });
+    exiger("declaration", d.status === 200 && d.corps && d.corps.ok && d.corps.data && d.corps.data.urlEnvoi, `HTTP ${d.status}${d.corps && d.corps.erreur ? ` (${d.corps.erreur})` : ""}`);
+    const id = d.corps.data.id;
+    try {
+      const ctrl = new AbortController(); const m1 = setTimeout(() => ctrl.abort(), DELAI_PARCOURS_MS);
+      let put;
+      try { put = await fetch(d.corps.data.urlEnvoi, { method: "PUT", headers: { "Content-Type": "text/csv" }, body: contenu, signal: ctrl.signal }); }
+      catch (e) { throw Object.assign(new Error(e.name === "AbortError" ? "stockage : aucune reponse" : "stockage : erreur reseau"), { etape: "depot" }); }
+      finally { clearTimeout(m1); }
+      exiger("depot", put.ok, `stockage HTTP ${put.status}`);
+      const g = await appelSonde(app, `/api/v1/fichiers/${encodeURIComponent(id)}`, { cookie });
+      exiger("relecture", g.status === 200 && g.corps && g.corps.ok && g.corps.data && g.corps.data.url, `HTTP ${g.status}`);
+      const ctrl2 = new AbortController(); const m2 = setTimeout(() => ctrl2.abort(), DELAI_PARCOURS_MS);
+      let lu;
+      try { lu = await fetch(g.corps.data.url, { signal: ctrl2.signal }); }
+      catch (e) { throw Object.assign(new Error("stockage : lecture impossible"), { etape: "relecture" }); }
+      finally { clearTimeout(m2); }
+      exiger("relecture", lu.ok && (await lu.text()) === contenu, `stockage HTTP ${lu.status} ou contenu different`);
+    } finally {
+      // retirer, meme apres un echec : le fichier de la sonde ne reste pas
+      const a = await appelSonde(app, "/api/v1/fichiers", { methode: "POST", cookie, corps: { abandon: id } }).catch(() => null);
+      if (!(a && a.status === 200 && a.corps && a.corps.ok && a.corps.data && a.corps.data.abandonne)) {
+        res._retrait = `retrait du fichier ${id} non confirme`;
+      }
+    }
+    exiger("retrait", !res._retrait, res._retrait);
+  });
+  await deconnecter(app, cookie);
+  delete res._retrait;
+  return res;
+}
+
+export async function parcoursPortail(app, compte) {
+  const debut = Date.now();
+  let cookie = null;
+  try {
+    cookie = await connecter(app, compte);
+    const d = await appelSonde(app, "/api/v1/portail/donnees", { cookie });
+    exiger("portail", d.status === 200 && d.corps && d.corps.ok && d.corps.data && d.corps.data.personneId, `HTTP ${d.status}${d.corps && d.corps.erreur ? ` (${d.corps.erreur})` : ""}`);
+    return { ok: true, ms: Date.now() - debut, etape: "", detail: "" };
+  } catch (e) {
+    return { ok: false, ms: Date.now() - debut, etape: e.etape || "portail", detail: String(e.message || e).slice(0, 160) };
+  } finally { await deconnecter(app, cookie); }
+}
+
+export async function jouerParcours(env, t) {
+  const cfg = configParcours(env);
+  if (!cfg.app || (!cfg.equipe && !cfg.portail)) return null; // non configures : le tableau de bord le dit
+  // La production en panne : la transition a deja alerte ; les parcours n'ajoutent pas de bruit.
+  const prod = await lireEtat(env, "production");
+  if (prod.verdict !== "ok") { console.log(`parcours non joues : production ${prod.verdict}`); return null; }
+  const resultats = {};
+  if (cfg.equipe) Object.assign(resultats, await parcoursEquipe(cfg.app, cfg.equipe, t));
+  if (cfg.portail) resultats.portail = await parcoursPortail(cfg.app, cfg.portail);
+  const maintenant = t.toISOString();
+  for (const nom of PARCOURS) {
+    const r = resultats[nom]; if (!r) continue;
+    const avant = await env.ETAT.prepare("SELECT * FROM parcours WHERE nom = ?").bind(nom).first();
+    if (r.nonJoue) {
+      await env.ETAT.prepare(`INSERT INTO parcours (nom, t, ok, ms, etape, detail, echecs, alerte) VALUES (?, ?, NULL, 0, ?, ?, 0, NULL)
+        ON CONFLICT(nom) DO UPDATE SET t = excluded.t, ok = NULL, ms = 0, etape = excluded.etape, detail = excluded.detail`)
+        .bind(nom, maintenant, r.etape, r.detail).run();
+      continue; // ni compté dans les 24 h, ni alerte
+    }
+    const echecs = r.ok ? 0 : (avant ? avant.echecs || 0 : 0) + 1;
+    let alerte = avant ? avant.alerte : null;
+    if (!r.ok && echecs === ECHECS_ALERTE) {
+      await pushover(env, "Cursus Connect - parcours",
+        `PARCOURS « ${nom} » EN ECHEC (${ECHECS_ALERTE} passages d'affilee) : etape ${r.etape} — ${r.detail}.`, 0);
+      alerte = maintenant;
+    } else if (r.ok && avant && avant.alerte) {
+      await pushover(env, "Cursus Connect - parcours", `Parcours « ${nom} » de nouveau reussi a ${heureLocale(maintenant)} (${r.ms} ms).`, 0);
+      alerte = null;
+    }
+    await env.ETAT.prepare(`INSERT INTO parcours (nom, t, ok, ms, etape, detail, echecs, alerte) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(nom) DO UPDATE SET t = excluded.t, ok = excluded.ok, ms = excluded.ms, etape = excluded.etape,
+      detail = excluded.detail, echecs = excluded.echecs, alerte = excluded.alerte`)
+      .bind(nom, maintenant, r.ok ? 1 : 0, r.ms || 0, r.etape || "", r.detail || "", echecs, alerte).run();
+    await env.ETAT.prepare("INSERT INTO parcours_journal (nom, t, ok, ms, etape) VALUES (?, ?, ?, ?, ?)")
+      .bind(nom, maintenant, r.ok ? 1 : 0, r.ms || 0, r.etape || "").run();
+  }
+  console.log(`parcours : ${PARCOURS.filter((n) => resultats[n]).map((n) => `${n} ${resultats[n].nonJoue ? "non joue" : resultats[n].ok ? "ok" : "ECHEC"}`).join(", ")}`);
+  return resultats;
 }
 
 /* --- tableau de bord ------------------------------------------------------------------- */
@@ -582,11 +774,16 @@ export async function tableau(requete, env, t) {
   const signaux = await q("SELECT * FROM signaux ORDER BY env, type, nom");
   const echeances = await q("SELECT * FROM echeances ORDER BY date");
   const epreuves = await q("SELECT * FROM epreuves ORDER BY env");
+  const parcours = await q("SELECT * FROM parcours");
+  const parcours24 = await q("SELECT nom, COUNT(*) AS n, SUM(ok) AS reussis FROM parcours_journal WHERE t >= ? GROUP BY nom",
+    new Date(t.getTime() - 24 * 3600000).toISOString());
   const abonnes = (await q("SELECT etat, COUNT(*) AS n FROM abonnes GROUP BY etat"))
     .reduce((a, x) => ({ ...a, [x.etat]: x.n }), {});
   const file = (await q("SELECT statut, COUNT(*) AS n FROM envois GROUP BY statut"))
     .reduce((a, x) => ({ ...a, [x.statut]: x.n }), {});
-  return new Response(pageTableau({ t, etats, mesures, transitions, signaux, echeances, abonnes, file, epreuves, code: codeEnService(env) }), {
+  const cfg = configParcours(env);
+  return new Response(pageTableau({ t, etats, mesures, transitions, signaux, echeances, abonnes, file, epreuves, code: codeEnService(env),
+    parcours, parcours24, parcoursConfig: { equipe: !!cfg.equipe, portail: !!cfg.portail } }), {
     headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
                "X-Robots-Tag": "noindex", "Referrer-Policy": "no-referrer" } });
 }
@@ -609,7 +806,24 @@ const dateHeure = (iso) => iso ? new Intl.DateTimeFormat("fr-FR", { timeZone: FU
 
 /** @param {{ t: Date, etats: any[], mesures: any[], transitions: any[], signaux: any[], echeances: any[],
  *   abonnes?: Record<string, number>, file?: Record<string, number>, epreuves?: any[], code?: { depot: boolean, texte: string } }} p */
-export function pageTableau({ t, etats, mesures, transitions, signaux, echeances, abonnes = {}, file = {}, epreuves = [], code = null }) {
+export function pageTableau({ t, etats, mesures, transitions, signaux, echeances, abonnes = {}, file = {}, epreuves = [], code = null,
+  parcours = [], parcours24 = [], parcoursConfig = { equipe: false, portail: false } }) {
+  const ETAPES_AFFICHEES = { declaration: "déclaration", depot: "dépôt", relecture: "relecture", retrait: "retrait", session: "session", lecture: "lecture", portail: "portail", connexion: "connexion" };
+  const blocParcours = () => {
+    const absents = [!parcoursConfig.equipe ? "compte « Sonde vigie » (SONDE_EQUIPE_EMAIL, SONDE_EQUIPE_MDP)" : null,
+      !parcoursConfig.portail ? "compte « Sonde portail » (SONDE_PORTAIL_EMAIL, SONDE_PORTAIL_MDP)" : null].filter(Boolean);
+    const ligne = (nom) => {
+      const p = parcours.find((x) => x.nom === nom), j = parcours24.find((x) => x.nom === nom);
+      if (!p) return `<tr><td>${nom}</td><td style="color:#646a80">pas encore joué</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>`;
+      const verdict = p.ok === null ? `<td style="color:#646a80">non joué</td>`
+        : `<td style="color:${p.ok ? "#1d7a46" : "#b3261e"};font-weight:600">${p.ok ? "réussi" : `EN ÉCHEC${p.echecs > 1 ? ` (${p.echecs} d'affilée)` : ""}`}</td>`;
+      return `<tr><td>${echapper(nom)}</td>${verdict}
+        <td>${echapper(dateHeure(p.t))}</td><td>${p.ms} ms</td><td>${j ? `${j.reussis}/${j.n}` : "-"}</td><td>${p.ok ? "—" : p.ok === null ? echapper(p.detail) : `${echapper(ETAPES_AFFICHEES[p.etape] || p.etape)} — ${echapper(p.detail)}`}</td></tr>`;
+    };
+    return `<section class="bloc"><h2>Parcours d'un utilisateur — Trois-Lacs, chaque heure à la minute ${MINUTE_PARCOURS}</h2>
+${absents.length ? `<p style="color:#b7791f">Non configuré : ${absents.map(echapper).join(" ; ")}. Ces parcours ne sont pas joués.</p>` : ""}
+<table><tr><th>Parcours</th><th>Dernier verdict</th><th>Quand</th><th>Durée</th><th>24 h</th><th>En défaut</th></tr>${PARCOURS.map(ligne).join("")}</table></section>`;
+  };
   const carte = (e) => {
     const m = mesures.filter((x) => x.env === e.env);
     const n = m.reduce((a, x) => a + x.n, 0), ko = m.reduce((a, x) => a + x.ko, 0);
@@ -647,6 +861,7 @@ p{margin:4px 0;font-size:13px}</style></head><body>
 <header><h1>Cursus Connect — vigie</h1><p>Mis à jour ${echapper(dateHeure(t.toISOString()))} · page rafraîchie chaque minute · historique public : status.cursusconnect.com</p></header>
 <main><div class="cartes">${etats.map(carte).join("") || "<p>Aucun relevé encore.</p>"}</div>
 <section class="bloc"><h2>Épreuve d'environnement — « ce qui est testé en test fonctionne en production »</h2>${epreuves.length ? `<table><tr><th>Env.</th><th>Verdict</th><th>Réglages</th><th>Version</th><th>Quand</th><th>Motif</th><th>En défaut</th></tr>${epreuves.map((e) => { let d = []; try { d = JSON.parse(e.detail || "[]"); } catch { d = []; } const ko = d.filter((x) => !x.ok); return `<tr><td>${echapper(e.env)}</td><td style="color:${e.ok ? "#1d7a46" : "#b3261e"};font-weight:600">${e.ok ? "opérant" : "EN ÉCHEC"}</td><td>${e.reussies}/${e.total}</td><td>${echapper(e.version || "-")}</td><td>${echapper(dateHeure(e.t))}</td><td>${echapper(e.motif)}</td><td>${ko.length ? ko.map((x) => `${echapper(x.nom)} — ${echapper(x.detail)}`).join("<br>") : "—"}</td></tr>`; }).join("")}</table>` : "<p>Aucune épreuve encore : première à 07:50 (Paris), ou dès la prochaine version.</p>"}</section>
+${blocParcours()}
 <section class="bloc"><h2>Tâches et signaux du produit</h2>${signaux.length ? `<table><tr><th>Env.</th><th>Type</th><th>Nom</th><th>État</th><th>Dernier signal</th><th>Détail</th></tr>${signaux.map(ligneSignal).join("")}</table>` : "<p>Aucun signal reçu du produit pour l'instant.</p>"}</section>
 <section class="bloc"><h2>Abonnés aux alertes d'incident</h2><p>${abonnes.actif || 0} abonné(s) actif(s) · ${abonnes.en_attente || 0} en attente de confirmation · file d'envoi : ${file.a_envoyer || 0} à envoyer${file.abandon ? `, <b style="color:#b3261e">${file.abandon} abandonné(s)</b>` : ""}</p></section>
 <section class="bloc"><h2>Code en service</h2><p style="color:${code && code.depot ? "#1d7a46" : "#b3261e"}">${echapper(code ? code.texte : "inconnu")}</p></section>
@@ -682,8 +897,9 @@ export async function abonnement(requete, env, t) {
   await preparer(env);
   if (url.pathname === "/abonnement" && requete.method === "POST") return inscrire(requete, env, t, cors);
   const jeton = (url.searchParams.get("j") || "").slice(0, 64);
-  if (url.pathname === "/abonnement/confirmer") return confirmer(requete, env, t, jeton);
-  if (url.pathname === "/abonnement/desinscrire") return desinscrire(requete, env, t, jeton);
+  const l = langueAbo(url.searchParams.get("l")); // la langue du lien, pour un jeton inconnu
+  if (url.pathname === "/abonnement/confirmer") return confirmer(requete, env, t, jeton, l);
+  if (url.pathname === "/abonnement/desinscrire") return desinscrire(requete, env, t, jeton, l);
   return new Response("", { status: 404 });
 }
 
@@ -692,6 +908,7 @@ async function inscrire(requete, env, t, cors) {
   let corps; try { corps = await requete.json(); } catch { return json({ ok: false, err: "corps" }, 400, cors); }
   const email = String(corps && corps.email || "").trim().toLowerCase();
   if (!FORME_EMAIL.test(email) || email.length > 254) return json({ ok: false, err: "adresse" }, 400, cors);
+  const langue = langueAbo(corps && corps.langue); // [module 2, S-2] la langue de la page d'etat
   const jour = t.toISOString().slice(0, 10);
   const c = await env.ETAT.prepare("SELECT n, valeur FROM compteurs WHERE cle = 'confirmations'").first();
   const n = c && c.valeur === jour ? c.n : 0;
@@ -703,63 +920,169 @@ async function inscrire(requete, env, t, cors) {
   if (connu && connu.derniere_demande && t.getTime() - Date.parse(connu.derniere_demande) < RELANCE_CONFIRMATION_MS) return reponse;
   const jeton = connu ? connu.jeton : jetonAleatoire();
   const maintenant = t.toISOString();
-  await env.ETAT.prepare(`INSERT INTO abonnes (email, jeton, etat, cree, confirme, derniere_demande)
-    VALUES (?, ?, 'en_attente', ?, NULL, ?) ON CONFLICT(email) DO UPDATE SET derniere_demande = excluded.derniere_demande`)
-    .bind(email, jeton, maintenant, maintenant).run();
+  await env.ETAT.prepare(`INSERT INTO abonnes (email, jeton, etat, cree, confirme, derniere_demande, langue)
+    VALUES (?, ?, 'en_attente', ?, NULL, ?, ?) ON CONFLICT(email) DO UPDATE SET derniere_demande = excluded.derniere_demande,
+    langue = excluded.langue`)
+    .bind(email, jeton, maintenant, maintenant, langue).run();
   await env.ETAT.prepare(`INSERT INTO compteurs (cle, n, valeur) VALUES ('confirmations', ?, ?)
     ON CONFLICT(cle) DO UPDATE SET n = excluded.n, valeur = excluded.valeur`).bind(n + 1, jour).run();
-  const lien = `${baseVigie(env, requete)}/abonnement/confirmer?j=${jeton}`;
-  const m = courrielConfirmation(lien);
-  await env.ETAT.prepare(`INSERT INTO envois (genre, email, jeton, sujet, texte, html, apres) VALUES ('confirmation', ?, ?, ?, ?, ?, ?)`)
-    .bind(email, jeton, m.sujet, m.texte, m.html, maintenant).run();
+  const lien = `${baseVigie(env, requete)}/abonnement/confirmer?j=${jeton}&l=${langue}`;
+  const m = courrielConfirmation(lien, langue);
+  await env.ETAT.prepare(`INSERT INTO envois (genre, email, jeton, sujet, texte, html, apres, langue) VALUES ('confirmation', ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(email, jeton, m.sujet, m.texte, m.html, maintenant, langue).run();
   // Premier essai tout de suite : l'utilisateur attend ce courriel. En cas d'echec,
   // la file le reprend a la minute suivante.
   await traiterEnvois(env, t, 1);
   return reponse;
 }
 
-async function confirmer(requete, env, t, jeton) {
+// Une phrase du dictionnaire, l'adresse en gras (echappee).
+const phraseAbo = (L, cle, email) => `<p>${remplirAbo(echapper(L[cle]), { email: `<b>${echapper(email)}</b>` })}</p>`;
+
+async function confirmer(requete, env, t, jeton, lLien = "fr") {
   const a = jeton ? await env.ETAT.prepare("SELECT * FROM abonnes WHERE jeton = ?").bind(jeton).first() : null;
-  if (!a) return pageHtml("Lien invalide ou expiré", "<p>Ce lien de confirmation n'est plus valable : une inscription non confirmée s'efface au bout de 48 heures. Vous pouvez vous inscrire de nouveau depuis la page d'état.</p>", 404);
-  if (a.etat === "actif") return pageHtml("Abonnement actif", `<p>L'adresse <b>${echapper(a.email)}</b> est déjà abonnée aux alertes d'incident de Cursus Connect.</p>`);
+  const l = a ? langueAbo(a.langue) : lLien, L = ABO[l];
+  if (!a) return pageHtml(L.invalideTitre, `<p>${echapper(L.invalide)}</p>`, 404, l);
+  if (a.etat === "actif") return pageHtml(L.actifTitre, phraseAbo(L, "actif", a.email), 200, l);
   if (requete.method !== "POST") {
-    return pageHtml("Confirmer l'abonnement", `<p>Recevoir un courriel à chaque incident de Cursus Connect, et à son rétablissement, à l'adresse <b>${echapper(a.email)}</b> ?</p>
-<form method="post"><button type="submit">Confirmer l'abonnement</button></form>`);
+    return pageHtml(L.confirmerTitre, `${phraseAbo(L, "confirmer", a.email)}
+<form method="post"><button type="submit">${echapper(L.confirmerBouton)}</button></form>`, 200, l);
   }
   await env.ETAT.prepare("UPDATE abonnes SET etat = 'actif', confirme = ? WHERE jeton = ?").bind(t.toISOString(), jeton).run();
-  return pageHtml("Abonnement confirmé", `<p>C'est fait : <b>${echapper(a.email)}</b> sera prévenue de chaque incident de Cursus Connect et de son rétablissement. Chaque courriel contient un lien de désinscription.</p>`);
+  return pageHtml(L.confirmeTitre, phraseAbo(L, "confirme", a.email), 200, l);
 }
 
-async function desinscrire(requete, env, t, jeton) {
+async function desinscrire(requete, env, t, jeton, lLien = "fr") {
   const a = jeton ? await env.ETAT.prepare("SELECT * FROM abonnes WHERE jeton = ?").bind(jeton).first() : null;
+  const l = a ? langueAbo(a.langue) : lLien, L = ABO[l];
   if (requete.method === "POST") {
     if (a) {
       await env.ETAT.prepare("DELETE FROM abonnes WHERE jeton = ?").bind(jeton).run();
       await env.ETAT.prepare("DELETE FROM envois WHERE jeton = ? AND statut = 'a_envoyer'").bind(jeton).run();
     }
-    return pageHtml("Désinscription faite", "<p>Vous ne recevrez plus les alertes d'incident de Cursus Connect. Votre adresse a été effacée.</p>");
+    return pageHtml(L.desinscritTitre, `<p>${echapper(L.desinscrit)}</p>`, 200, l);
   }
-  if (!a) return pageHtml("Déjà désinscrit", "<p>Cette adresse ne reçoit pas, ou plus, les alertes d'incident de Cursus Connect.</p>");
-  return pageHtml("Se désinscrire", `<p>Ne plus recevoir les alertes d'incident de Cursus Connect à l'adresse <b>${echapper(a.email)}</b> ?</p>
-<form method="post"><button type="submit">Me désinscrire</button></form>`);
+  if (!a) return pageHtml(L.dejaTitre, `<p>${echapper(L.deja)}</p>`, 200, l);
+  return pageHtml(L.desinscrireTitre, `${phraseAbo(L, "desinscrire", a.email)}
+<form method="post"><button type="submit">${echapper(L.desinscrireBouton)}</button></form>`, 200, l);
 }
 
-function pageHtml(titre, contenu, status = 200) {
-  return new Response(`<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex"><title>${echapper(titre)} — Cursus Connect</title><style>
+function pageHtml(titre, contenu, status = 200, langue = "fr") {
+  const L = ABO[langueAbo(langue)];
+  return new Response(`<!doctype html><html lang="${langueAbo(langue)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex"><title>${echapper(titre)} — ${echapper(L.suffixeTitre)}</title><style>
 body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#f4f6fa;color:#1b1f2a;margin:0;padding:48px 16px}
 main{max-width:520px;margin:0 auto;background:#fff;border-radius:12px;padding:28px 30px;box-shadow:0 1px 3px #0001}
 h1{font-size:20px;color:#29327a;margin:0 0 12px}p{line-height:1.5}button{font:inherit;font-weight:600;color:#fff;background:#1a6e9e;
 border:0;border-radius:8px;padding:10px 18px;cursor:pointer}a{color:#1a6e9e}</style></head><body><main>
-<h1>${echapper(titre)}</h1>${contenu}<p><a href="${PAGE_ETAT}">État des services Cursus Connect</a></p></main></body></html>`, {
+<h1>${echapper(titre)}</h1>${contenu}<p><a href="${PAGE_ETAT}">${echapper(L.lienPage)}</a></p></main></body></html>`, {
     status, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Robots-Tag": "noindex",
       "Referrer-Policy": "no-referrer", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'" } });
 }
 
+/* [module 2, decision PO S-2 du 20.10.2026] L'ABONNEMENT DANS LA LANGUE DE L'ABONNE : la langue de la
+   page d'etat au moment de l'inscription est gardee avec l'adresse ; confirmation, courriels d'etat,
+   pages de confirmation et de desinscription la suivent. Les abonnes anterieurs restent en francais. */
+export const LANGUES_ABO = ["fr", "de", "en"];
+const langueAbo = (l) => (LANGUES_ABO.includes(l) ? l : "fr");
+const LOCALE_ABO = { fr: "fr-FR", de: "de-DE", en: "en-GB" };
+const ABO = {
+  fr: {
+    entete: "Cursus Connect — état des services", expediteur: "Cursus Connect — état des services",
+    lienPage: "État des services Cursus Connect", suffixeTitre: "Cursus Connect",
+    confSujet: "Cursus Connect — confirmez votre abonnement aux alertes d'incident", confTitre: "Confirmez votre abonnement",
+    confP1: "Vous avez demandé à être prévenu des incidents de Cursus Connect.",
+    confP2: "Pour activer l'abonnement, ouvrez ce lien puis cliquez sur « Confirmer » : {lien}",
+    confP3: "Si vous n'êtes pas à l'origine de cette demande, ignorez ce message : sans confirmation, votre adresse sera effacée sous 48 heures.",
+    confPied: "Life Support Distribution · éditeur de Cursus Connect · {page}",
+    invalideTitre: "Lien invalide ou expiré", invalide: "Ce lien de confirmation n'est plus valable : une inscription non confirmée s'efface au bout de 48 heures. Vous pouvez vous inscrire de nouveau depuis la page d'état.",
+    actifTitre: "Abonnement actif", actif: "L'adresse {email} est déjà abonnée aux alertes d'incident de Cursus Connect.",
+    confirmerTitre: "Confirmer l'abonnement", confirmer: "Recevoir un courriel à chaque incident de Cursus Connect, et à son rétablissement, à l'adresse {email} ?", confirmerBouton: "Confirmer l'abonnement",
+    confirmeTitre: "Abonnement confirmé", confirme: "C'est fait : {email} sera prévenue de chaque incident de Cursus Connect et de son rétablissement. Chaque courriel contient un lien de désinscription.",
+    desinscritTitre: "Désinscription faite", desinscrit: "Vous ne recevrez plus les alertes d'incident de Cursus Connect. Votre adresse a été effacée.",
+    dejaTitre: "Déjà désinscrit", deja: "Cette adresse ne reçoit pas, ou plus, les alertes d'incident de Cursus Connect.",
+    desinscrireTitre: "Se désinscrire", desinscrire: "Ne plus recevoir les alertes d'incident de Cursus Connect à l'adresse {email} ?", desinscrireBouton: "Me désinscrire",
+    retabliSujet: "Cursus Connect — service rétabli", retabliTitre: "Le service est rétabli",
+    retabli: "Cursus Connect fonctionne de nouveau normalement depuis {heure} (heure de Paris), après {duree} de perturbation.", merci: "Merci de votre patience.",
+    degradeSujet: "Cursus Connect — service dégradé", degradeTitre: "Service dégradé",
+    degrade: "Depuis {heure} (heure de Paris), Cursus Connect reste accessible, mais {quoi}.",
+    degradeUn: "{touche} est perturbé", degradePlusieurs: "{touches} sont perturbés", degradeInconnu: "une de ses fonctions est perturbée", et: " et ",
+    prevenus: "Nos équipes en ont été prévenues automatiquement et interviennent.",
+    incidentSujet: "Cursus Connect — incident en cours", incidentTitre: "Incident en cours",
+    incident: "Depuis {heure} (heure de Paris), Cursus Connect ne répond pas normalement.",
+    incidentSuite: "Nos équipes en ont été prévenues automatiquement et interviennent. Vous recevrez un courriel au rétablissement.",
+    suivi: "Suivi en direct : {page}",
+    piedEtat: "Vous recevez ce message parce que vous êtes abonné aux alertes d'incident de Cursus Connect. {lien}.", seDesinscrire: "Se désinscrire",
+    touche: { stockage: "le dépôt et la consultation des fichiers", courriel: "l'envoi des e-mails (convocations, invitations, codes de connexion)" },
+    duree: (h, m) => (h ? `${h} h ${String(m).padStart(2, "0")}` : `${m} min`),
+  },
+  de: {
+    entete: "Cursus Connect — Dienststatus", expediteur: "Cursus Connect — Dienststatus",
+    lienPage: "Dienststatus von Cursus Connect", suffixeTitre: "Cursus Connect",
+    confSujet: "Cursus Connect — bestätigen Sie Ihr Abonnement für Störungsmeldungen", confTitre: "Bestätigen Sie Ihr Abonnement",
+    confP1: "Sie haben darum gebeten, über Störungen von Cursus Connect benachrichtigt zu werden.",
+    confP2: "Um das Abonnement zu aktivieren, öffnen Sie diesen Link und klicken Sie auf „Abonnement bestätigen“: {lien}",
+    confP3: "Wenn Sie diese Anfrage nicht gestellt haben, ignorieren Sie diese Nachricht: Ohne Bestätigung wird Ihre Adresse innerhalb von 48 Stunden gelöscht.",
+    confPied: "Life Support Distribution · Herausgeber von Cursus Connect · {page}",
+    invalideTitre: "Ungültiger oder abgelaufener Link", invalide: "Dieser Bestätigungslink ist nicht mehr gültig: Eine nicht bestätigte Anmeldung wird nach 48 Stunden gelöscht. Sie können sich auf der Statusseite erneut anmelden.",
+    actifTitre: "Abonnement aktiv", actif: "Die Adresse {email} ist bereits für die Störungsmeldungen von Cursus Connect angemeldet.",
+    confirmerTitre: "Abonnement bestätigen", confirmer: "Bei jeder Störung von Cursus Connect und bei ihrer Behebung eine E-Mail an {email} erhalten?", confirmerBouton: "Abonnement bestätigen",
+    confirmeTitre: "Abonnement bestätigt", confirme: "Erledigt: {email} wird über jede Störung von Cursus Connect und ihre Behebung benachrichtigt. Jede E-Mail enthält einen Link zur Abmeldung.",
+    desinscritTitre: "Abmeldung erfolgt", desinscrit: "Sie erhalten keine Störungsmeldungen von Cursus Connect mehr. Ihre Adresse wurde gelöscht.",
+    dejaTitre: "Bereits abgemeldet", deja: "Diese Adresse ist nicht (mehr) für die Störungsmeldungen von Cursus Connect angemeldet.",
+    desinscrireTitre: "Abmelden", desinscrire: "Keine Störungsmeldungen von Cursus Connect mehr an {email} erhalten?", desinscrireBouton: "Abmelden",
+    retabliSujet: "Cursus Connect — Dienst wiederhergestellt", retabliTitre: "Der Dienst ist wiederhergestellt",
+    retabli: "Cursus Connect funktioniert seit {heure} (mitteleuropäische Zeit) wieder normal, nach {duree} Störung.", merci: "Vielen Dank für Ihre Geduld.",
+    degradeSujet: "Cursus Connect — Dienst eingeschränkt", degradeTitre: "Dienst eingeschränkt",
+    degrade: "Seit {heure} (mitteleuropäische Zeit) ist Cursus Connect zwar erreichbar, aber {quoi}.",
+    degradeUn: "{touche} ist gestört", degradePlusieurs: "{touches} sind gestört", degradeInconnu: "eine seiner Funktionen ist gestört", et: " und ",
+    prevenus: "Unsere Teams wurden automatisch benachrichtigt und greifen ein.",
+    incidentSujet: "Cursus Connect — laufende Störung", incidentTitre: "Laufende Störung",
+    incident: "Seit {heure} (mitteleuropäische Zeit) antwortet Cursus Connect nicht normal.",
+    incidentSuite: "Unsere Teams wurden automatisch benachrichtigt und greifen ein. Sie erhalten eine E-Mail, sobald der Dienst wiederhergestellt ist.",
+    suivi: "Live-Verfolgung: {page}",
+    piedEtat: "Sie erhalten diese Nachricht, weil Sie die Störungsmeldungen von Cursus Connect abonniert haben. {lien}.", seDesinscrire: "Abmelden",
+    touche: { stockage: "das Hochladen und Öffnen von Dateien", courriel: "der E-Mail-Versand (Einladungen, Aufgebote, Anmeldecodes)" },
+    duree: (h, m) => (h ? `${h} Std. ${String(m).padStart(2, "0")} Min.` : `${m} Min.`),
+  },
+  en: {
+    entete: "Cursus Connect — service status", expediteur: "Cursus Connect — service status",
+    lienPage: "Cursus Connect service status", suffixeTitre: "Cursus Connect",
+    confSujet: "Cursus Connect — confirm your subscription to incident alerts", confTitre: "Confirm your subscription",
+    confP1: "You asked to be notified of Cursus Connect incidents.",
+    confP2: "To activate the subscription, open this link and click “Confirm the subscription”: {lien}",
+    confP3: "If you did not make this request, ignore this message: without confirmation, your address will be deleted within 48 hours.",
+    confPied: "Life Support Distribution · publisher of Cursus Connect · {page}",
+    invalideTitre: "Invalid or expired link", invalide: "This confirmation link is no longer valid: an unconfirmed subscription is deleted after 48 hours. You can subscribe again from the status page.",
+    actifTitre: "Subscription active", actif: "The address {email} is already subscribed to Cursus Connect incident alerts.",
+    confirmerTitre: "Confirm the subscription", confirmer: "Receive an e-mail at {email} for every Cursus Connect incident, and when it is resolved?", confirmerBouton: "Confirm the subscription",
+    confirmeTitre: "Subscription confirmed", confirme: "Done: {email} will be notified of every Cursus Connect incident and its resolution. Every e-mail contains an unsubscribe link.",
+    desinscritTitre: "Unsubscribed", desinscrit: "You will no longer receive Cursus Connect incident alerts. Your address has been deleted.",
+    dejaTitre: "Already unsubscribed", deja: "This address is not (or no longer) subscribed to Cursus Connect incident alerts.",
+    desinscrireTitre: "Unsubscribe", desinscrire: "Stop receiving Cursus Connect incident alerts at {email}?", desinscrireBouton: "Unsubscribe",
+    retabliSujet: "Cursus Connect — service restored", retabliTitre: "Service restored",
+    retabli: "Cursus Connect has been working normally again since {heure} (Central European time), after {duree} of disruption.", merci: "Thank you for your patience.",
+    degradeSujet: "Cursus Connect — degraded service", degradeTitre: "Degraded service",
+    degrade: "Cursus Connect is available, but since {heure} (Central European time) {quoi}.",
+    degradeUn: "{touche} is disrupted", degradePlusieurs: "{touches} are disrupted", degradeInconnu: "one of its functions is disrupted", et: " and ",
+    prevenus: "Our teams have been alerted automatically and are working on it.",
+    incidentSujet: "Cursus Connect — ongoing incident", incidentTitre: "Ongoing incident",
+    incident: "Cursus Connect has not been responding normally since {heure} (Central European time).",
+    incidentSuite: "Our teams have been alerted automatically and are working on it. You will receive an e-mail when the service is restored.",
+    suivi: "Live updates: {page}",
+    piedEtat: "You are receiving this message because you subscribed to Cursus Connect incident alerts. {lien}.", seDesinscrire: "Unsubscribe",
+    touche: { stockage: "uploading and opening files", courriel: "e-mail delivery (invitations, joining instructions, sign-in codes)" },
+    duree: (h, m) => (h ? `${h} h ${String(m).padStart(2, "0")} min` : `${m} min`),
+  },
+};
+const remplirAbo = (modele, v = {}) => String(modele).replace(/\{(\w+)\}/g, (m, k) => (v[k] != null ? String(v[k]) : m));
+const heureAbo = (iso, l) => new Intl.DateTimeFormat(LOCALE_ABO[langueAbo(l)], { timeZone: FUSEAU, hour: "2-digit", minute: "2-digit" }).format(new Date(iso));
+const dureeAbo = (a, b, l) => { const m = Math.max(0, Math.round((Date.parse(b) - Date.parse(a)) / 60000)); return ABO[langueAbo(l)].duree(Math.floor(m / 60), m < 60 ? m : m % 60); };
+
 // Courriels : texte ET HTML, sans image ni suivi.
-function gabarit(titre, paragraphes, pied) {
+function gabarit(titre, paragraphes, pied, langue = "fr") {
   const html = `<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#1b1f2a">
-<div style="background:#29327a;color:#fff;padding:14px 20px;border-radius:10px 10px 0 0;font-weight:bold">Cursus Connect — état des services</div>
+<div style="background:#29327a;color:#fff;padding:14px 20px;border-radius:10px 10px 0 0;font-weight:bold">${echapper(ABO[langueAbo(langue)].entete)}</div>
 <div style="border:1px solid #e2e7f0;border-top:0;border-radius:0 0 10px 10px;padding:18px 20px">
 <h2 style="font-size:17px;color:#29327a;margin:0 0 10px">${echapper(titre)}</h2>
 ${paragraphes.map((p) => `<p style="line-height:1.5;margin:0 0 10px">${p}</p>`).join("")}
@@ -768,42 +1091,43 @@ ${paragraphes.map((p) => `<p style="line-height:1.5;margin:0 0 10px">${p}</p>`).
 }
 const sansBalises = (s) => s.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'");
 
-function courrielConfirmation(lien) {
-  const titre = "Confirmez votre abonnement";
+export function courrielConfirmation(lien, langue = "fr") {
+  const L = ABO[langueAbo(langue)];
+  const titre = L.confTitre;
   const p = [
-    "Vous avez demandé à être prévenu des incidents de Cursus Connect.",
-    `Pour activer l'abonnement, ouvrez ce lien puis cliquez sur « Confirmer » : <a href="${echapper(lien)}">${echapper(lien)}</a>`,
-    "Si vous n'êtes pas à l'origine de cette demande, ignorez ce message : sans confirmation, votre adresse sera effacée sous 48 heures.",
+    echapper(L.confP1),
+    remplirAbo(echapper(L.confP2), { lien: `<a href="${echapper(lien)}">${echapper(lien)}</a>` }),
+    echapper(L.confP3),
   ];
-  const pied = `Life Support Distribution · éditeur de Cursus Connect · <a href="${PAGE_ETAT}">${PAGE_ETAT}</a>`;
-  return { sujet: "Cursus Connect — confirmez votre abonnement aux alertes d'incident",
-           texte: [titre, "", ...p.map(sansBalises), "", lien].join("\n"), html: gabarit(titre, p, pied) };
+  const pied = remplirAbo(echapper(L.confPied), { page: `<a href="${PAGE_ETAT}">${PAGE_ETAT}</a>` });
+  return { sujet: L.confSujet,
+           texte: [titre, "", ...p.map(sansBalises), "", lien].join("\n"), html: gabarit(titre, p, pied, langue) };
 }
 
 // Ce que dit un courriel d'etat : l'etat, depuis quand, ce qui est touche - en mots de
-// client, jamais un nom de composant interne ni un code d'erreur.
-const TOUCHE = { stockage: "le dépôt et la consultation des fichiers", courriel: "l'envoi des e-mails (convocations, invitations, codes de connexion)" };
-export function courrielEtat(etatAvant, releve, t) {
-  const heure = heureLocale(t.toISOString());
-  const touches = Object.entries(TOUCHE).filter(([k]) => (releve.detail || "").includes(k)).map(([, v]) => v);
+// client, jamais un nom de composant interne ni un code d'erreur. [module 2] Dans la langue de l'abonne.
+export function courrielEtat(etatAvant, releve, t, langue = "fr") {
+  const L = ABO[langueAbo(langue)];
+  const heure = heureAbo(t.toISOString(), langue);
+  const touches = Object.entries(L.touche).filter(([k]) => (releve.detail || "").includes(k)).map(([, v]) => v);
   let sujet, titre, p;
   if (releve.verdict === "ok") {
-    sujet = "Cursus Connect — service rétabli";
-    titre = "Le service est rétabli";
-    p = [`Cursus Connect fonctionne de nouveau normalement depuis ${heure} (heure de Paris), après ${duree(etatAvant.depuis, t.toISOString())} de perturbation.`,
-         "Merci de votre patience."];
+    sujet = L.retabliSujet;
+    titre = L.retabliTitre;
+    p = [remplirAbo(L.retabli, { heure, duree: dureeAbo(etatAvant.depuis, t.toISOString(), langue) }), L.merci];
   } else if (releve.verdict === "degrade") {
-    sujet = "Cursus Connect — service dégradé";
-    titre = "Service dégradé";
-    p = [`Depuis ${heure} (heure de Paris), Cursus Connect reste accessible, mais ${touches.length ? touches.join(" et ") + (touches.length > 1 ? " sont perturbés" : " est perturbé") : "une de ses fonctions est perturbée"}.`,
-         "Nos équipes en ont été prévenues automatiquement et interviennent."];
+    sujet = L.degradeSujet;
+    titre = L.degradeTitre;
+    const quoi = !touches.length ? L.degradeInconnu : touches.length === 1 ? remplirAbo(L.degradeUn, { touche: touches[0] })
+      : remplirAbo(L.degradePlusieurs, { touches: touches.join(L.et) });
+    p = [remplirAbo(L.degrade, { heure, quoi }), L.prevenus];
   } else {
-    sujet = "Cursus Connect — incident en cours";
-    titre = "Incident en cours";
-    p = [`Depuis ${heure} (heure de Paris), Cursus Connect ne répond pas normalement.`,
-         "Nos équipes en ont été prévenues automatiquement et interviennent. Vous recevrez un courriel au rétablissement."];
+    sujet = L.incidentSujet;
+    titre = L.incidentTitre;
+    p = [remplirAbo(L.incident, { heure }), L.incidentSuite];
   }
-  p.push(`Suivi en direct : <a href="${PAGE_ETAT}">${PAGE_ETAT}</a>`);
+  p = p.map(echapper);
+  p.push(remplirAbo(echapper(L.suivi), { page: `<a href="${PAGE_ETAT}">${PAGE_ETAT}</a>` }));
   return { sujet, titre, p };
 }
 
@@ -814,19 +1138,23 @@ export function courrielEtat(etatAvant, releve, t) {
 // remplacement repousserait l'envoi d'autant).
 async function notifierAbonnes(env, etatAvant, releve, t) {
   if (!env.SCW_TEM_CLE) return;
-  const { results } = await env.ETAT.prepare("SELECT email, jeton FROM abonnes WHERE etat = 'actif'").all();
+  const { results } = await env.ETAT.prepare("SELECT email, jeton, langue FROM abonnes WHERE etat = 'actif'").all();
   if (!results || !results.length) return;
   await env.ETAT.prepare("DELETE FROM envois WHERE genre = 'etat' AND statut = 'a_envoyer'").run();
   const dernier = await env.ETAT.prepare("SELECT valeur FROM compteurs WHERE cle = 'derniere_notif'").first();
   const apres = new Date(Math.max(t.getTime(), dernier ? Date.parse(dernier.valeur) + NOTIF_MIN_MS : 0)).toISOString();
-  const m = courrielEtat(etatAvant, releve, t);
+  const messages = {}; // un message par langue (S-2)
   const base = baseVigie(env);
   const stmts = results.map((a) => {
-    const pied = `Vous recevez ce message parce que vous êtes abonné aux alertes d'incident de Cursus Connect. <a href="${base}/abonnement/desinscrire?j=${a.jeton}">Se désinscrire</a>.`;
-    const html = gabarit(m.titre, m.p, pied);
-    const texte = [m.titre, "", ...m.p.map(sansBalises), "", `Se désinscrire : ${base}/abonnement/desinscrire?j=${a.jeton}`].join("\n");
-    return env.ETAT.prepare(`INSERT INTO envois (genre, email, jeton, sujet, texte, html, apres) VALUES ('etat', ?, ?, ?, ?, ?, ?)`)
-      .bind(a.email, a.jeton, m.sujet, texte, html, apres);
+    const l = langueAbo(a.langue);
+    const m = messages[l] || (messages[l] = courrielEtat(etatAvant, releve, t, l));
+    const L = ABO[l];
+    const lienD = `${base}/abonnement/desinscrire?j=${a.jeton}&l=${l}`;
+    const pied = remplirAbo(echapper(L.piedEtat), { lien: `<a href="${lienD}">${echapper(L.seDesinscrire)}</a>` });
+    const html = gabarit(m.titre, m.p, pied, l);
+    const texte = [m.titre, "", ...m.p.map(sansBalises), "", `${L.seDesinscrire}${l === "fr" ? " :" : ":"} ${lienD}`].join("\n"); // « : » à la française en FR seulement
+    return env.ETAT.prepare(`INSERT INTO envois (genre, email, jeton, sujet, texte, html, apres, langue) VALUES ('etat', ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(a.email, a.jeton, m.sujet, texte, html, apres, l);
   });
   await env.ETAT.batch(stmts);
 }
@@ -860,13 +1188,13 @@ export async function traiterEnvois(env, t, max = ENVOIS_PAR_MINUTE) {
 async function envoyerTem(env, e) {
   const entetes = [{ key: "Reply-To", value: REPONSE_SUPPORT }];
   if (e.genre === "etat") {
-    const lien = `${baseVigie(env)}/abonnement/desinscrire?j=${e.jeton}`;
+    const lien = `${baseVigie(env)}/abonnement/desinscrire?j=${e.jeton}&l=${langueAbo(e.langue)}`;
     entetes.push({ key: "List-Unsubscribe", value: `<${lien}>` }, { key: "List-Unsubscribe-Post", value: "List-Unsubscribe=One-Click" });
   }
   const r = await fetch("https://api.scaleway.com/transactional-email/v1alpha1/regions/fr-par/emails", {
     method: "POST",
     headers: { "X-Auth-Token": env.SCW_TEM_CLE, "Content-Type": "application/json" },
-    body: JSON.stringify({ from: { email: env.ABONNEMENT_EXPEDITEUR, name: "Cursus Connect — état des services" },
+    body: JSON.stringify({ from: { email: env.ABONNEMENT_EXPEDITEUR, name: ABO[langueAbo(e.langue)].expediteur },
       to: [{ email: e.email }], subject: e.sujet, text: e.texte, html: e.html, project_id: env.SCW_PROJET,
       additional_headers: entetes }),
   });
