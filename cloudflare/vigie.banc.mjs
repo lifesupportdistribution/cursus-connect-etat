@@ -146,10 +146,10 @@ await verifierEcheances(env, new Date("2026-09-27T06:00:00Z")); assert.equal(pus
 await verifierEcheances(env, new Date("2026-10-04T06:00:00Z")); assert.equal(pushs().length, 1); raz();
 await verifierEcheances(env, new Date("2026-10-05T06:00:00Z")); assert.equal(pushs().length, 1); raz();
 rdap.ko = true; await verifierEcheances(env, new Date("2026-10-06T06:00:00Z")); p = pushs(); assert.equal(p.length, 1); assert.match(p[0].message, /expire dans 3 jour/); rdap.ko = false; raz(); // 10.10 00:00 - 06.10 06:00 = 3,75 j
-assert.equal(ligne("SELECT COUNT(*) AS c FROM echeances").c, 7); // [lot 6] 5 echeances fixes + le domaine ; [lot 10] + le jeton Cloudflare
+assert.equal(ligne("SELECT COUNT(*) AS c FROM echeances").c, 8); // [lot 6] 5 echeances fixes + le domaine ; [lot 10] + le jeton Cloudflare ; [1.639.0] + la cle des domaines
 assert.equal(ligne("SELECT COUNT(*) AS c FROM echeances WHERE cle = 'scaleway'").c, 0);
 assert.deepEqual(db.prepare("SELECT cle, date FROM echeances WHERE cle NOT LIKE 'domaine:%' ORDER BY cle").all().map((x) => `${x.cle}=${x.date}`),
-  ["carte-ovh=2027-02-28", "cloudflare-deploiement=2027-10-04", "github=2027-09-19", "scaleway-production=2027-09-15", "scaleway-test=2027-08-22", "scaleway-vigie=2027-09-19"]);
+  ["carte-ovh=2027-02-28", "cloudflare-deploiement=2027-10-04", "github=2027-09-19", "scaleway-domaines=2027-11-08", "scaleway-production=2027-09-15", "scaleway-test=2027-08-22", "scaleway-vigie=2027-09-19"]);
 ok("echeances : preavis 30 j, hebdomadaire puis quotidien, RDAP en panne tolere ; registre a 5 lignes fixes, ligne perimee retiree"); raz();
 // 18. tableau de bord : ferme, protege, echappe
 const req = (auth) => new Request("https://vigie/", { headers: auth ? { Authorization: auth } : {} });

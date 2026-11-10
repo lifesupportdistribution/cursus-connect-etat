@@ -120,6 +120,9 @@ const ECHEANCES_FIXES = [
   { cle: "carte-ovh", nom: "Carte bancaire du compte OVHcloud", date: "2027-02-28" },
   // [lot 10, P2-03] jeton du deploiement par GitHub Actions (secret CLOUDFLARE_API_TOKEN)
   { cle: "cloudflare-deploiement", nom: "Jeton Cloudflare de deploiement de la vigie", date: "2027-10-04" },
+  // [produit 1.639.0, 10.11.2026] cle de l'application IAM cursus-connect-tem-domaines (gestion des
+  // domaines des centres, variable SCW_TEM_CLE des deux projets Vercel) ; expire le 09.11.2027
+  { cle: "scaleway-domaines", nom: "Cle API Scaleway de gestion des domaines des centres (produit)", date: "2027-11-08" },
 ];
 const DOMAINES = ["cursusconnect.com"];
 const PREAVIS_JOURS = 30;
